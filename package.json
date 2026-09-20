@@ -1,0 +1,14 @@
+{
+  "name": "pixel-clues",
+  "version": "1.0.0",
+  "description": "Pixel Clues — crossword-driven spatial puzzle prototype (vanilla HTML/CSS/JS)",
+  "private": true,
+  "scripts": {
+    "verify-levels": "node tools/verify_levels.js",
+    "test:unit": "node tests/unit.test.js",
+    "test:e2e": "node tests/e2e_test.js",
+    "test": "npm run verify-levels && npm run test:unit && npm run test:e2e",
+    "serve": "python -m http.server 8080"
+  },
+  "devDependencies": { "playwright": "^1.56.0" }
+}

@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pixel Clues</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231f5c45'/%3E%3Crect x='3' y='3' width='4' height='4' fill='%23f28fb1'/%3E%3Crect x='9' y='3' width='4' height='4' fill='%23ffd23f'/%3E%3Crect x='3' y='9' width='4' height='4' fill='%23ffd23f'/%3E%3Crect x='9' y='9' width='4' height='4' fill='%23f28fb1'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<noscript><p style="padding:24px">Pixel Clues needs JavaScript enabled.</p></noscript>
+
+<main id="app" class="app-shell">
+
+  <!-- ================= HOME ================= -->
+  <section id="screen-home" class="screen home" aria-labelledby="home-title">
+    <div class="home-card">
+      <div class="home-art"><canvas id="home-canvas" aria-label="Pixel art flower garden" role="img"></canvas></div>
+      <div class="home-text">
+        <p class="eyebrow">A crossword × pixel-art puzzle</p>
+        <h1 id="home-title" class="logo"><span>PIXEL</span> <span class="pink">CLUES</span></h1>
+        <p class="tagline">Solve words &rarr; earn pixels &rarr; design connected shapes &rarr; place them &rarr; build the picture.</p>
+        <div class="home-actions">
+          <button class="btn btn-primary btn-lg" id="btn-play" type="button">Play</button>
+          <button class="btn btn-ghost btn-lg" id="btn-help" type="button">How to play</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= LEVEL SELECT ================= -->
+  <section id="screen-levels" class="screen" aria-labelledby="levels-title" hidden>
+    <header class="page-head">
+      <button class="btn btn-ghost btn-sm" id="btn-levels-home" type="button">&larr; Home</button>
+      <h2 id="levels-title">Choose a puzzle</h2>
+      <span class="spacer"></span>
+    </header>
+    <div class="levels-grid" id="levels-grid"></div>
+    <div class="levels-tools">
+      <label class="switch" title="Lets you open locked levels for a demo without changing saved progress">
+        <input type="checkbox" id="presenter-toggle">
+        <span>Presenter mode <small>(open any level; locked levels don't save progress)</small></span>
+      </label>
+      <button class="btn btn-ghost btn-sm" id="btn-reset-progress" type="button">Reset progress</button>
+    </div>
+    <p class="storage-note" id="storage-note" hidden>Progress can't be saved in this browser, but you can still play.</p>
+  </section>
+
+  <!-- ================= GAME ================= -->
+  <section id="screen-game" class="screen" aria-labelledby="game-title" hidden>
+    <header class="game-head">
+      <button class="btn btn-ghost btn-sm" id="btn-exit" type="button">&larr; Levels</button>
+      <div class="game-title">
+        <h2 id="game-title">Level</h2>
+        <span class="chip" id="game-size">8×8</span>
+      </div>
+      <div class="timer" title="Time" aria-live="off"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="13" r="8" fill="none" stroke="currentColor" stroke-width="2.5"/><path d="M12 8v5l3 2M9 2h6" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg><span id="timer">00:00</span></div>
+    </header>
+
+    <div class="progress-row">
+      <div class="progress-text"><strong id="progress-text">0 / 3 clues</strong> <span class="muted" id="hint-count"></span></div>
+      <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+    </div>
+
+    <div class="toolbar">
+      <button class="btn btn-ghost btn-sm" id="btn-undo" type="button" title="Pick up the last placed block">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M9 7 4 12l5 5M4 12h10a6 6 0 0 1 0 12" transform="translate(0 -3)" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Undo</button>
+      <button class="btn btn-ghost btn-sm" id="btn-restart" type="button" title="Start this level again">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.4-5.7M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Restart</button>
+      <button class="btn btn-hint btn-sm" id="btn-hint" type="button" title="Reveal a letter (costs 75 points)">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z" fill="currentColor" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>Hint</button>
+    </div>
+
+    <div id="coach" class="coach" hidden><span class="coach-step" id="coach-step"></span><span id="coach-text"></span></div>
+    <div id="status" class="status info" role="status" aria-live="polite">&nbsp;</div>
+
+    <div class="puzzle-layout">
+      <section class="panel clues-panel" aria-label="Clues">
+        <h3>Clues</h3>
+        <ol class="clue-list" id="clue-list"></ol>
+      </section>
+
+      <section class="panel board-panel" aria-label="Puzzle grid">
+        <div class="grid-frame" id="grid-frame">
+          <div class="main-grid" id="main-grid" role="grid" aria-label="Puzzle grid"></div>
+        </div>
+        <p class="legend"><span class="lg lg-target"></span> picture to build <span class="lg lg-pre"></span> already filled <span class="lg lg-off"></span> outside picture</p>
+      </section>
+
+      <section class="panel work-panel" id="work-panel" aria-label="Shape workspace">
+        <h3>Shape workspace</h3>
+
+        <div id="panel-idle" class="work-idle">
+          <p><strong>No pixels yet.</strong></p>
+          <p class="muted">Solve a clue to earn pixels, then shape them here.</p>
+        </div>
+
+        <div id="panel-builder" hidden>
+          <p class="need">Required pixels: <strong id="need-count">4</strong> &nbsp;·&nbsp; Selected: <strong id="sel-count" class="sel">0 / 4</strong></p>
+          <div class="builder-grid" id="builder-grid" role="group" aria-label="Shape builder. Click cells to toggle."></div>
+          <p class="builder-msg" id="builder-msg" aria-live="polite"></p>
+          <div class="row-btns">
+            <button class="btn btn-ghost btn-sm" id="btn-builder-reset" type="button">Reset</button>
+            <button class="btn btn-primary btn-sm" id="btn-confirm" type="button">Confirm Shape</button>
+          </div>
+        </div>
+
+        <div id="panel-tray" hidden>
+          <p class="need">Your block <span class="muted" id="tray-for"></span></p>
+          <div class="tray-wrap"><div class="tray-block" id="tray-block" role="button" tabindex="0" aria-label="Your block. Drag it onto the grid, or press Enter then click a grid cell."></div></div>
+          <p class="builder-msg muted" id="tray-help">Drag the block onto the grid &mdash; or tap it, then tap a grid cell.</p>
+          <div class="row-btns">
+            <button class="btn btn-ghost btn-sm" id="btn-rotate" type="button" title="Rotate 90° (R)">Rotate</button>
+            <button class="btn btn-ghost btn-sm" id="btn-reshape" type="button">Edit shape</button>
+          </div>
+          <p class="muted small" id="queue-note" hidden></p>
+        </div>
+      </section>
+    </div>
+  </section>
+</main>
+
+<!-- ================= OVERLAYS (hidden ones never intercept input) ================= -->
+<div id="overlay-complete" class="overlay" role="dialog" aria-modal="true" aria-labelledby="complete-title" hidden>
+  <div class="modal complete">
+    <p class="eyebrow" id="complete-sub">Level complete</p>
+    <h2 id="complete-title">COMPLETE!</h2>
+    <div class="stars" id="complete-stars" aria-label="Stars"></div>
+    <canvas id="complete-canvas" aria-label="Finished pixel art" role="img"></canvas>
+    <ul class="stats">
+      <li id="stat-clues">All clues solved</li>
+      <li>Time: <strong id="stat-time">00:00</strong></li>
+      <li>Score: <strong id="stat-score">0</strong></li>
+    </ul>
+    <p class="muted small" id="stat-breakdown"></p>
+    <div class="row-btns center">
+      <button class="btn btn-ghost" id="btn-replay" type="button">Replay</button>
+      <button class="btn btn-ghost" id="btn-complete-levels" type="button">Level Select</button>
+      <button class="btn btn-primary" id="btn-next" type="button">Next Level</button>
+    </div>
+  </div>
+</div>
+
+<div id="overlay-help" class="overlay" role="dialog" aria-modal="true" aria-labelledby="help-title" hidden>
+  <div class="modal">
+    <h2 id="help-title">How to play</h2>
+    <ol class="howto">
+      <li><strong>Solve a clue.</strong> Type the answer and press Enter.</li>
+      <li><strong>Earn pixels.</strong> A 6-letter answer gives you 6 pixels.</li>
+      <li><strong>Design a shape.</strong> Click cells to make <em>any</em> connected shape from exactly that many pixels (edges must touch &mdash; corners don't count).</li>
+      <li><strong>Confirm</strong>, then <strong>drag the whole block</strong> onto the grid.</li>
+      <li><strong>Fill the faint picture.</strong> Use Undo or Restart if you get stuck.</li>
+    </ol>
+    <div class="row-btns center"><button class="btn btn-primary" id="btn-help-close" type="button">Got it</button></div>
+  </div>
+</div>
+
+<script src="js/levels.js"></script>
+<script src="js/grid.js"></script>
+<script src="js/polyomino.js"></script>
+<script src="js/crossword.js"></script>
+<script src="js/scoring.js"></script>
+<script src="js/storage.js"></script>
+<script src="js/game.js"></script>
+<script src="js/ui.js"></script>
+</body>
+</html>
