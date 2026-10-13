@@ -1,4 +1,9 @@
-/* game.js — central game state + rules. No DOM access: ui.js renders whatever state says. */
+/* game.js — central game state + rules. No DOM access: ui.js renders whatever state says.
+ *
+ * Interaction model: solving a clue earns N pixels and opens a "drawing" phase where the
+ * player paints/erases directly on the main grid (click, or click-and-drag). Exactly N
+ * connected cells must be drawn, then Confirm commits them to the grid permanently.
+ */
 (function () {
   const PC = (globalThis.PC = globalThis.PC || {});
   const { Grid, Polyomino, Crossword, Scoring, Storage } = PC;
@@ -13,11 +18,10 @@
       currentLevel: null,   // level object
       currentClue: 0,       // index of the clue the player is working on
       solvedClues: [],      // clue indices answered correctly
-      placedBlocks: [],     // [{clue, cells(rel), dx, dy, id}]
+      placedBlocks: [],     // [{id, clue, cells:[{x,y}] (absolute)}]
       grid: [],
       earnedPixels: 0,
-      currentShape: [],     // confirmed relative cells of the block waiting to be placed
-      queue: [],            // pending rewards: [{clue, n, builder:[{x,y}], shape:null|[{x,y}]}]
+      queue: [],            // pending rewards: [{clue, n, cells:[{x,y}] (absolute, being drawn)}]
       hintReveals: {},      // clue -> number of revealed letters
       hintsUsed: 0,
       invalidAttempts: 0,   // wrong answers
@@ -29,8 +33,7 @@
       completed: false,
       saveEnabled: true,
       blockCounter: 0,
-      message: { text: '', type: 'info' },
-      wrongMsg: {}          // clue -> last wrong message flag
+      message: { text: '', type: 'info' }
     },
 
     on(fn) { Game.listeners.push(fn); },
@@ -83,7 +86,6 @@
       s.placedBlocks = [];
       s.grid = Grid.fromLevel(level);
       s.earnedPixels = 0;
-      s.currentShape = [];
       s.queue = [];
       s.hintReveals = {};
       s.hintsUsed = 0;
@@ -120,11 +122,9 @@
     phase() {
       const s = Game.state;
       if (s.completed) return 'complete';
-      if (!s.queue.length) return 'solving';
-      return s.queue[0].shape ? 'placing' : 'building';
+      return s.queue.length ? 'drawing' : 'solving';
     },
     active() { return Game.state.queue[0] || null; },
-    builderSize(n) { return Math.max(4, n); },
     clueStatus(i) {
       const s = Game.state;
       if (s.placedBlocks.some((b) => b.clue === i)) return 'completed';
@@ -143,6 +143,17 @@
       if (s.currentLevel && i >= 0 && i < s.currentLevel.clues.length) { s.currentClue = i; Game.emit('change'); }
     },
 
+    /** What a cell on the main grid currently means for the player: used by the UI to pick
+     *  a cursor/paint-or-erase mode and to decide what a click should do. */
+    cellInfo(x, y) {
+      const s = Game.state;
+      if (!Grid.inBounds(s.grid, x, y)) return { kind: 'outside' };
+      const item = Game.active();
+      if (item && item.cells.some((c) => c.x === x && c.y === y)) return { kind: 'own' };
+      if (s.grid[y][x] !== null) return { kind: 'occupied' };
+      return { kind: 'empty' };
+    },
+
     /* ---------- clues ---------- */
     submitAnswer(i, text) {
       const s = Game.state;
@@ -156,7 +167,7 @@
       const verdict = Crossword.check(clue, text);
       if (verdict === 'empty') return { status: 'empty' };
       if (Game.phase() !== 'solving') {
-        const msg = 'Place your current block first!';
+        const msg = 'Finish your current shape before solving another clue!';
         Game.setMessage(msg, 'warn');
         Game.emit('change');
         return { status: 'busy', message: msg };
@@ -171,136 +182,128 @@
       const n = clue.answer.length;
       s.solvedClues.push(i);
       s.earnedPixels += n;
-      s.queue.push({ clue: i, n, builder: [], shape: null });
+      s.queue.push({ clue: i, n, cells: [] });
       s.currentClue = i;
-      Game.setMessage(`Correct! You earned ${n} pixels.`, 'success');
+      Game.setMessage(`Correct! You earned ${n} pixels. Draw a connected shape on the grid.`, 'success');
       Game.emit('correct', { clue: i, n });
       Game.emit('change');
       return { status: 'correct', n, message: `Correct! You earned ${n} pixels.` };
     },
 
-    /* ---------- builder ---------- */
-    toggleBuilderCell(x, y) {
-      if (Game.phase() !== 'building') return { ok: false };
-      const item = Game.active();
-      const size = Game.builderSize(item.n);
-      if (x < 0 || y < 0 || x >= size || y >= size) return { ok: false };
-      const idx = item.builder.findIndex((c) => c.x === x && c.y === y);
-      if (idx >= 0) item.builder.splice(idx, 1); else item.builder.push({ x, y });
-      Game.setMessage(Game.builderStatusMessage(item), 'info');
-      Game.emit('change');
-      return { ok: true, count: item.builder.length };
+    /* ---------- direct drawing on the main grid ---------- */
+    drawStatusMessage(item) {
+      const c = item.cells.length;
+      if (c === item.n) return Polyomino.isConnected(item.cells) ? 'Looks good — press Confirm Shape.' : 'All pixels must be connected.';
+      if (c === 0) return `Draw ${item.n} connected pixels on the grid.`;
+      return `${item.n - c} more pixel${item.n - c > 1 ? 's' : ''} to go.`;
     },
 
-    builderStatusMessage(item) {
-      const c = item.builder.length;
-      if (c === item.n) {
-        return Polyomino.isConnected(item.builder) ? 'Looks good — press Confirm Shape.' : 'All pixels must be connected.';
+    /** Add one cell to the shape being drawn. No-op if already drawn. Rejects foreign-occupied
+     *  cells and rejects once the pixel budget (N pixels) is already spent. */
+    paintCell(x, y) {
+      if (Game.phase() !== 'drawing') return { ok: false };
+      const s = Game.state, item = Game.active();
+      if (!Grid.inBounds(s.grid, x, y)) return { ok: false };
+      if (item.cells.some((c) => c.x === x && c.y === y)) return { ok: true, noop: true };
+      if (s.grid[y][x] !== null) {
+        Game.setMessage('That space is already occupied.', 'error');
+        Game.emit('cellBlocked', { x, y });
+        Game.emit('change');
+        return { ok: false, reason: 'occupied', message: 'That space is already occupied.' };
       }
-      if (c > item.n) return `Use exactly ${item.n} pixels.`;
-      return `Create any connected shape using all ${item.n} pixels.`;
+      if (item.cells.length >= item.n) {
+        const word = s.currentLevel.clues[item.clue].answer;
+        const msg = `All ${item.n} pixels for ${word} have been placed.`;
+        Game.setMessage(msg, 'warn');
+        Game.emit('budgetExceeded', { x, y });
+        Game.emit('change');
+        return { ok: false, reason: 'budget', message: msg };
+      }
+      item.cells.push({ x, y });
+      Game.setMessage(Game.drawStatusMessage(item), 'info');
+      Game.emit('change');
+      return { ok: true, count: item.cells.length };
     },
 
-    resetBuilder() {
-      if (Game.phase() !== 'building') return { ok: false };
-      Game.active().builder = [];
-      Game.setMessage(`Create any connected shape using all ${Game.active().n} pixels.`, 'info');
+    /** Remove one cell from the shape being drawn. No-op if it isn't currently drawn. */
+    eraseCell(x, y) {
+      if (Game.phase() !== 'drawing') return { ok: false };
+      const item = Game.active();
+      const idx = item.cells.findIndex((c) => c.x === x && c.y === y);
+      if (idx < 0) return { ok: true, noop: true };
+      item.cells.splice(idx, 1);
+      Game.setMessage(Game.drawStatusMessage(item), 'info');
+      Game.emit('change');
+      return { ok: true, count: item.cells.length };
+    },
+
+    /** Plain click/tap on a cell (no drag): toggle it. Used to decide a drag's paint/erase mode too. */
+    toggleCell(x, y) {
+      const info = Game.cellInfo(x, y);
+      if (info.kind === 'own') return Game.eraseCell(x, y);
+      return Game.paintCell(x, y);
+    },
+
+    clearDrawing() {
+      if (Game.phase() !== 'drawing') return { ok: false };
+      const item = Game.active();
+      item.cells = [];
+      Game.setMessage(`Draw ${item.n} connected pixels on the grid.`, 'info');
       Game.emit('change');
       return { ok: true };
     },
 
+    /** Lock in the current drawing: valid only at exactly N connected cells. On success the
+     *  cells become a permanent placed block and the next queued clue (if any) becomes active. */
     confirmShape() {
-      if (Game.phase() !== 'building') return { ok: false };
-      const item = Game.active();
-      const v = Polyomino.validate(item.builder, item.n);
+      if (Game.phase() !== 'drawing') return { ok: false };
+      const s = Game.state, item = Game.active();
+      const v = Polyomino.validate(item.cells, item.n);
       if (!v.valid) {
         Game.setMessage(v.message, 'error');
         Game.emit('shapeInvalid', v);
         Game.emit('change');
         return { ok: false, reason: v.reason, message: v.message, stray: v.stray };
       }
-      item.shape = Polyomino.normalize(item.builder);
-      Game.state.currentShape = item.shape;
-      Game.setMessage('Shape locked in! Drag the block onto the puzzle grid.', 'success');
-      Game.emit('shapeConfirmed');
-      Game.emit('change');
-      return { ok: true, shape: item.shape };
-    },
-
-    /** Go back from the placement tray to the builder (keeps the current orientation). */
-    reshape() {
-      if (Game.phase() !== 'placing') return { ok: false };
-      const item = Game.active();
-      item.builder = item.shape.map((c) => ({ x: c.x, y: c.y }));
-      item.shape = null;
-      Game.state.currentShape = [];
-      Game.setMessage(`Adjust your ${item.n} pixels, then confirm again.`, 'info');
-      Game.emit('change');
-      return { ok: true };
-    },
-
-    rotate() {
-      if (Game.phase() !== 'placing') return { ok: false };
-      const item = Game.active();
-      item.shape = Polyomino.rotate(item.shape);
-      Game.state.currentShape = item.shape;
-      Game.emit('change');
-      return { ok: true };
-    },
-
-    /* ---------- placement ---------- */
-    place(dropX, dropY) {
-      if (Game.phase() !== 'placing') return { ok: false, reason: 'no-block', message: 'Build and confirm a shape first.' };
-      const s = Game.state;
-      const item = Game.active();
-      const check = Grid.canPlace(s.grid, item.shape, dropX, dropY);
-      if (!check.ok) {
-        // Failure never modifies grid / blocks / queue.
-        Game.setMessage(check.message, 'error');
-        Game.emit('placeFailed', check);
-        Game.emit('change');
-        return check;
-      }
       const id = ++s.blockCounter;
-      Grid.put(s.grid, item.shape, dropX, dropY, { clue: item.clue, block: id });
-      s.placedBlocks.push({ id, clue: item.clue, cells: item.shape.map((c) => ({ x: c.x, y: c.y })), dx: dropX, dy: dropY });
+      const cells = item.cells.map((c) => ({ x: c.x, y: c.y }));
+      Grid.put(s.grid, cells, { clue: item.clue, block: id });
+      s.placedBlocks.push({ id, clue: item.clue, cells });
       s.queue.shift();
-      s.currentShape = s.queue[0] && s.queue[0].shape ? s.queue[0].shape : [];
 
       const cmp = Grid.compare(s.grid, s.currentLevel.target);
-      const offTarget = Grid.absolute(item.shape, dropX, dropY).filter((c) => !s.currentLevel.target[c.y][c.x]).length;
+      const offTarget = cells.filter((c) => !s.currentLevel.target[c.y][c.x]).length;
       const allPlaced = s.placedBlocks.length === s.currentLevel.clues.length;
 
       if (cmp.match && allPlaced && !s.queue.length) {
-        Game.setMessage('Block placed — the picture is complete!', 'success');
+        Game.setMessage('Shape placed — the picture is complete!', 'success');
         Game.emit('placed', { id, offTarget });
         Game.completeLevel();
-        return { ok: true, reason: null, message: '', complete: true, offTarget };
+        return { ok: true, complete: true, offTarget };
       }
       if (allPlaced) {
-        Game.setMessage('All blocks are placed but the picture doesn\'t match yet. Use Undo or Restart to rearrange.', 'warn');
+        Game.setMessage('All shapes are placed but the picture doesn\'t match yet. Use Undo or Restart to rearrange.', 'warn');
       } else if (offTarget > 0) {
         Game.setMessage(`Placed — but ${offTarget} pixel${offTarget > 1 ? 's are' : ' is'} outside the picture. Undo if that wasn't intended.`, 'warn');
       } else {
-        Game.setMessage(s.queue.length ? 'Placed! Now place your next block.' : 'Placed! Pick the next clue.', 'success');
+        Game.setMessage(s.queue.length ? 'Nice! Now draw your next shape.' : 'Placed! Pick the next clue.', 'success');
       }
       Game.emit('placed', { id, offTarget });
       Game.emit('change');
-      return { ok: true, reason: null, message: '', complete: false, offTarget };
+      return { ok: true, complete: false, offTarget };
     },
 
-    /** Undo last placement: the block returns to the tray (front of the queue) with its shape. */
+    /** Undo last confirmed shape: its cells return to the grid as an editable drawing-in-progress. */
     undo() {
       const s = Game.state;
       if (s.completed) return { ok: false };
       const last = s.placedBlocks.pop();
       if (!last) { Game.setMessage('Nothing to undo yet.', 'info'); Game.emit('change'); return { ok: false, message: 'Nothing to undo yet.' }; }
-      Grid.remove(s.grid, last.cells, last.dx, last.dy);
+      Grid.remove(s.grid, last.cells);
       const clueLen = s.currentLevel.clues[last.clue].answer.length;
-      s.queue.unshift({ clue: last.clue, n: clueLen, builder: last.cells.map((c) => ({ x: c.x, y: c.y })), shape: last.cells.map((c) => ({ x: c.x, y: c.y })) });
-      s.currentShape = s.queue[0].shape;
+      s.queue.unshift({ clue: last.clue, n: clueLen, cells: last.cells.map((c) => ({ x: c.x, y: c.y })) });
       s.undos++;
-      Game.setMessage('Last block picked up — place it somewhere else.', 'info');
+      Game.setMessage('Last shape picked up — redraw it somewhere else.', 'info');
       Game.emit('undone');
       Game.emit('change');
       return { ok: true };
@@ -334,7 +337,7 @@
           return { ok: true, clue: i, revealed: shown + 1, free: false };
         }
       }
-      // While building/placing (or if nothing to reveal) show where pixels are still needed. Free.
+      // While drawing (or if nothing to reveal) show where pixels are still needed. Free.
       Game.setMessage('Highlighting the spots that still need pixels.', 'info');
       Game.emit('flashTarget');
       Game.emit('change');

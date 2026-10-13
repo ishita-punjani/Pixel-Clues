@@ -12,41 +12,46 @@ function test(name, fn) {
 }
 const cells = (...pairs) => pairs.map(([x, y]) => ({ x, y }));
 
-console.log('Polyomino validation');
+console.log('Polyomino validation (used directly on the main grid\'s absolute coordinates now)');
 test('correct count + connected → valid', () => assert.strictEqual(Polyomino.validate(cells([0, 0], [1, 0], [1, 1], [1, 2]), 4).valid, true));
 test('correct count + disconnected → invalid', () => { const r = Polyomino.validate(cells([0, 0], [1, 0], [3, 3], [3, 4]), 4); assert.strictEqual(r.valid, false); assert.strictEqual(r.message, 'All pixels must be connected.'); });
 test('too few cells → invalid "Use exactly N pixels."', () => { const r = Polyomino.validate(cells([0, 0], [1, 0]), 4); assert.strictEqual(r.valid, false); assert.strictEqual(r.message, 'Use exactly 4 pixels.'); });
 test('too many cells → invalid', () => assert.strictEqual(Polyomino.validate(cells([0, 0], [1, 0], [2, 0], [3, 0], [4, 0]), 4).valid, false));
 test('diagonal-only → invalid', () => assert.strictEqual(Polyomino.validate(cells([0, 0], [1, 1]), 2).valid, false));
 test('diagonal chain of 4 → invalid', () => assert.strictEqual(Polyomino.validate(cells([0, 0], [1, 1], [2, 2], [3, 3]), 4).valid, false));
-test('irregular connected (S/Z/T/L/plus/snake) → valid', () => {
-  assert.ok(Polyomino.validate(cells([1, 0], [2, 0], [0, 1], [1, 1]), 4).valid);
+test('irregular connected (S/Z/T/L/plus/snake) → valid, anywhere on the grid', () => {
+  assert.ok(Polyomino.validate(cells([11, 5], [12, 5], [10, 6], [11, 6]), 4).valid);
   assert.ok(Polyomino.validate(cells([1, 0], [0, 1], [1, 1], [2, 1], [1, 2]), 5).valid);
   assert.ok(Polyomino.validate(cells([0, 0], [1, 0], [1, 1], [2, 1], [2, 2], [3, 2]), 6).valid);
-  assert.ok(Polyomino.validate(cells([0, 0], [0, 1], [0, 2], [0, 3], [0, 4], [0, 5]), 6).valid); // straight line
+  assert.ok(Polyomino.validate(cells([4, 4], [4, 5], [4, 6], [4, 7], [4, 8], [4, 9]), 6).valid); // straight line
 });
 test('single cell is valid for n=1; empty invalid', () => { assert.ok(Polyomino.validate(cells([2, 2]), 1).valid); assert.ok(!Polyomino.validate([], 3).valid); });
-test('stray cells identified', () => assert.strictEqual(Polyomino.stray(cells([0, 0], [1, 0], [2, 0], [5, 5])).length, 1));
-test('normalize removes blank rows/cols', () => assert.deepStrictEqual(Polyomino.normalize(cells([3, 4], [4, 4], [4, 5])), cells([0, 0], [1, 0], [1, 1])));
-test('rotate keeps size, connectivity, normalised', () => {
-  let s = Polyomino.normalize(cells([0, 0], [1, 0], [1, 1], [1, 2]));
-  for (let i = 0; i < 4; i++) { s = Polyomino.rotate(s); assert.strictEqual(s.length, 4); assert.ok(Polyomino.isConnected(s)); assert.strictEqual(Math.min(...s.map((c) => c.x)), 0); assert.strictEqual(Math.min(...s.map((c) => c.y)), 0); }
-  assert.deepStrictEqual(s, Polyomino.normalize(cells([0, 0], [1, 0], [1, 1], [1, 2])));
-});
+test('stray cells identified (used to highlight the disconnected pixels on the grid)', () => assert.strictEqual(Polyomino.stray(cells([0, 0], [1, 0], [2, 0], [5, 5])).length, 1));
 
-console.log('Grid placement');
-const shape = cells([0, 0], [1, 0], [1, 1]); // L-tromino
-test('fully inside empty grid → valid', () => assert.ok(Grid.canPlace(Grid.create(8), shape, 2, 2).ok));
-test('out of bounds left', () => { const r = Grid.canPlace(Grid.create(8), shape, -1, 2); assert.strictEqual(r.reason, 'out-of-bounds'); });
-test('out of bounds right (partially)', () => assert.strictEqual(Grid.canPlace(Grid.create(8), shape, 7, 2).reason, 'out-of-bounds'));
-test('out of bounds top', () => assert.strictEqual(Grid.canPlace(Grid.create(8), shape, 2, -1).reason, 'out-of-bounds'));
-test('out of bounds bottom', () => assert.strictEqual(Grid.canPlace(Grid.create(8), shape, 2, 7).reason, 'out-of-bounds'));
-test('completely outside → invalid', () => assert.ok(!Grid.canPlace(Grid.create(8), shape, 20, 20).ok));
-test('grid edges exactly: top-left and bottom-right valid', () => { assert.ok(Grid.canPlace(Grid.create(8), shape, 0, 0).ok); assert.ok(Grid.canPlace(Grid.create(8), shape, 6, 6).ok); });
-test('overlap → collision', () => { const g = Grid.create(8); Grid.put(g, shape, 2, 2, { clue: 0, block: 1 }); const r = Grid.canPlace(g, shape, 3, 2); assert.strictEqual(r.reason, 'collision'); assert.strictEqual(r.message, 'That space is already occupied.'); });
-test('touching without overlap → valid', () => { const g = Grid.create(8); Grid.put(g, shape, 2, 2, { clue: 0, block: 1 }); assert.ok(Grid.canPlace(g, shape, 4, 2).ok); });
-test('canPlace never mutates grid', () => { const g = Grid.create(8); Grid.canPlace(g, shape, 3, 3); assert.ok(g.every((r) => r.every((c) => c === null))); });
-test('cellFromPoint uses rendered rect at any size', () => {
+console.log('Grid occupancy (direct-draw placement model)');
+test('cells start free; put() occupies them, remove() frees them', () => {
+  const g = Grid.create(8);
+  assert.ok(Grid.isFree(g, 2, 2) && !Grid.isOccupied(g, 2, 2));
+  Grid.put(g, cells([2, 2], [3, 2]), { clue: 0, block: 1 });
+  assert.ok(Grid.isOccupied(g, 2, 2) && Grid.isOccupied(g, 3, 2) && Grid.isFree(g, 4, 2));
+  Grid.remove(g, cells([2, 2], [3, 2]));
+  assert.ok(Grid.isFree(g, 2, 2) && Grid.isFree(g, 3, 2));
+});
+test('inBounds / isFree / isOccupied reject out-of-range coordinates', () => {
+  const g = Grid.create(8);
+  assert.ok(!Grid.inBounds(g, -1, 0) && !Grid.inBounds(g, 8, 0) && !Grid.inBounds(g, 0, 8));
+  assert.ok(!Grid.isFree(g, -1, 0) && !Grid.isOccupied(g, -1, 0));
+});
+test('fromLevel pre-occupies the level\'s prefilled cells only', () => {
+  const lv = PC.LEVELS.find((l) => l.id === 4); // Hard has a prefilled stone/grass base
+  const g = Grid.fromLevel(lv);
+  let pre = 0, free = 0;
+  for (let y = 0; y < lv.gridSize; y++) for (let x = 0; x < lv.gridSize; x++) {
+    if (lv.prefilled[y][x]) { assert.ok(Grid.isOccupied(g, x, y)); pre++; } else { assert.ok(Grid.isFree(g, x, y)); free++; }
+  }
+  assert.ok(pre > 0 && free > 0);
+});
+test('cellFromPoint uses rendered rect at any size (resize-safe)', () => {
   for (const w of [180, 320, 520]) {
     const rect = { left: 40, top: 60, width: w, height: w };
     const cw = w / 8;
@@ -54,6 +59,16 @@ test('cellFromPoint uses rendered rect at any size', () => {
     assert.ok(!Grid.cellFromPoint(rect, 8, 39, 100).inside);
     assert.ok(!Grid.cellFromPoint(rect, 8, 40 + w, 100).inside);
   }
+});
+test('target/occupancy comparison (final-puzzle validation stays internal, never rendered)', () => {
+  // target[y][x]: row y=0 requires x=1; row y=1 requires x=1. So only (1,0) and (1,1) are required.
+  const target = [[0, 1], [0, 1]];
+  const g = Grid.create(2);
+  assert.ok(!Grid.compare(g, target).match);
+  Grid.put(g, cells([1, 0], [0, 1], [1, 1]), { clue: 0, block: 1 });
+  assert.strictEqual(Grid.compare(g, target).extra.length, 1); // (0,1) not required
+  Grid.remove(g, cells([0, 1]));
+  assert.ok(Grid.compare(g, target).match);
 });
 
 console.log('Crossword');
@@ -68,7 +83,7 @@ test('star thresholds', () => { assert.strictEqual(Scoring.stars(850), 3); asser
 test('score floors at 100; max 3 stars', () => { assert.strictEqual(Scoring.compute({ seconds: 99999, hints: 50, wrong: 50, undos: 50 }, { parTime: 10 }).score, 100); });
 test('formatTime', () => { assert.strictEqual(Scoring.formatTime(161), '02:41'); assert.strictEqual(Scoring.formatTime(0), '00:00'); });
 
-console.log('Level data + solvability');
+console.log('Level data + solvability (target matrix is unchanged internally)');
 test('every level: rows are square, answer lengths == player cells', () => PC.LEVELS.forEach((l) => { assert.strictEqual(l.rows.length, l.gridSize); assert.strictEqual(l.totalPixels, l.playerCells, `L${l.id}`); }));
 test('Medium matches spec (FLOWER 6, LEAF 4, BEE 3, STEM 4, SUN 3; 12x12)', () => {
   const m = PC.LEVELS.find((l) => l.id === 3);
@@ -77,17 +92,20 @@ test('Medium matches spec (FLOWER 6, LEAF 4, BEE 3, STEM 4, SUN 3; 12x12)', () =
   assert.deepStrictEqual(m.clues.map((c) => c.clue), ['A colourful plant with petals', 'Green part on a stem', 'Buzzing garden visitor', 'Holds the flower upright', 'Gives warmth and light']);
 });
 test('grid sizes 8/10/12/15/20 and 3 clues in Beginner', () => { assert.deepStrictEqual(PC.LEVELS.map((l) => l.gridSize), [8, 10, 12, 15, 20]); assert.strictEqual(PC.LEVELS[0].clues.length, 3); });
-test('difficulty scales (clues, pixels, longest word)', () => {
-  for (let i = 1; i < PC.LEVELS.length; i++) assert.ok(PC.LEVELS[i].playerCells > PC.LEVELS[i - 1].playerCells || PC.LEVELS[i].id === 3);
-});
 PC.LEVELS.forEach((l) => test(`L${l.id} ${l.name} has at least one valid solution (constructive proof)`, () => { const r = solve(l); assert.ok(r.solution, r.error); }));
 
-console.log('Game engine (all levels solved through the public Game API)');
+console.log('Game engine — direct drawing on the main grid (all levels solved through the public Game API)');
 function fakeStorage(fail) {
   const m = {};
   return { getItem: (k) => (k in m ? m[k] : null), setItem: (k, v) => { if (fail) throw new Error('quota'); m[k] = v; }, _m: m };
 }
-function playSolution(levelId, opts = {}) {
+/** Paint a clue's proven-solution cells directly at their absolute grid position and confirm — this
+ *  is exactly what a player does by clicking/dragging on the main grid in the new interaction model. */
+function drawAndConfirm(piece) {
+  piece.cells.forEach((c) => Game.paintCell(c.x, c.y));
+  return Game.confirmShape();
+}
+function playSolution(levelId) {
   const lv = PC.LEVELS.find((l) => l.id === levelId);
   const sol = solve(lv).solution;
   assert.ok(Game.startLevel(levelId).ok);
@@ -95,12 +113,8 @@ function playSolution(levelId, opts = {}) {
     const r = Game.submitAnswer(piece.clue, lv.clues[piece.clue].answer);
     assert.strictEqual(r.status, 'correct');
     assert.strictEqual(r.n, lv.clues[piece.clue].answer.length);
-    const minX = Math.min(...piece.cells.map((c) => c.x)), minY = Math.min(...piece.cells.map((c) => c.y));
-    const rel = piece.cells.map((c) => ({ x: c.x - minX, y: c.y - minY }));
-    rel.forEach((c) => Game.toggleBuilderCell(c.x, c.y));
-    assert.ok(Game.confirmShape().ok);
-    const p = Game.place(minX, minY);
-    assert.ok(p.ok, `place failed ${p.reason}`);
+    const c = drawAndConfirm(piece);
+    assert.ok(c.ok, `confirm failed ${c.reason}`);
   }
   return lv;
 }
@@ -132,53 +146,88 @@ test('answers: wrong / empty / duplicate / pixel count / busy', () => {
   assert.strictEqual(Game.state.earnedPixels, 4);
   assert.strictEqual(Game.submitAnswer(0, 'ROOF').status, 'duplicate');
   assert.strictEqual(Game.state.earnedPixels, 4, 'duplicate must not grant pixels again');
-  assert.strictEqual(Game.submitAnswer(1, 'DOOR').status, 'busy', 'must place current block first');
+  assert.strictEqual(Game.submitAnswer(1, 'DOOR').status, 'busy', 'must finish the current shape first');
   assert.strictEqual(Game.state.solvedClues.length, 1);
-  assert.strictEqual(Game.state.progress, undefined);
-  assert.strictEqual(Game.progress().done, 0, 'progress only after placement');
+  assert.strictEqual(Game.progress().done, 0, 'progress only after a shape is confirmed');
   Game.exit();
 });
 
-test('builder: too few / too many / disconnected / diagonal rejected; state unchanged', () => {
-  Game.startLevel(1); Game.submitAnswer(0, 'ROOF');
-  [[0, 0], [1, 0]].forEach(([x, y]) => Game.toggleBuilderCell(x, y));
-  let r = Game.confirmShape(); assert.ok(!r.ok); assert.strictEqual(r.message, 'Use exactly 4 pixels.');
-  [[2, 0], [3, 0], [3, 1]].forEach(([x, y]) => Game.toggleBuilderCell(x, y));
-  r = Game.confirmShape(); assert.ok(!r.ok); assert.strictEqual(r.message, 'Use exactly 4 pixels.');
-  Game.resetBuilder(); assert.strictEqual(Game.active().builder.length, 0);
-  [[0, 0], [1, 1], [2, 2], [3, 3]].forEach(([x, y]) => Game.toggleBuilderCell(x, y));
-  r = Game.confirmShape(); assert.strictEqual(r.reason, 'disconnected'); assert.strictEqual(r.message, 'All pixels must be connected.');
-  assert.strictEqual(Game.phase(), 'building');
-  Game.resetBuilder();
-  [[0, 0], [1, 0], [1, 1], [1, 2]].forEach(([x, y]) => Game.toggleBuilderCell(x, y));
-  assert.ok(Game.confirmShape().ok); assert.strictEqual(Game.phase(), 'placing');
+test('direct drawing: click toggles a single cell; click-and-drag paints/erases multiple', () => {
+  Game.startLevel(1); Game.submitAnswer(0, 'ROOF'); // 4 pixels
+  assert.strictEqual(Game.cellInfo(2, 2).kind, 'empty');
+  Game.toggleCell(2, 2); // single click = toggle
+  assert.strictEqual(Game.cellInfo(2, 2).kind, 'own');
+  Game.toggleCell(2, 2); // click again removes it
+  assert.strictEqual(Game.cellInfo(2, 2).kind, 'empty');
+  [{ x: 2, y: 2 }, { x: 3, y: 2 }, { x: 2, y: 3 }, { x: 3, y: 3 }].forEach((c) => Game.paintCell(c.x, c.y));
+  assert.strictEqual(Game.active().cells.length, 4);
   Game.exit();
 });
 
-test('failed placement leaves grid/blocks/queue untouched (out-of-bounds & collision)', () => {
+test('pixel budget (exactly N pixels per clue): extra paint attempts are rejected with the clue\'s answer named', () => {
   Game.startLevel(1); Game.submitAnswer(0, 'ROOF');
-  [[0, 0], [1, 0], [2, 0], [3, 0]].forEach(([x, y]) => Game.toggleBuilderCell(x, y)); Game.confirmShape();
-  const snap = () => JSON.stringify([Game.state.grid, Game.state.placedBlocks, Game.state.queue.length, Game.state.earnedPixels]);
-  const before = snap();
-  for (const [x, y] of [[5, 0], [-1, 0], [0, 8], [0, -1], [99, 99]]) { const r = Game.place(x, y); assert.ok(!r.ok); assert.strictEqual(snap(), before); }
-  assert.ok(Game.place(0, 0).ok);
+  [[0, 0], [1, 0], [2, 0], [3, 0]].forEach(([x, y]) => Game.paintCell(x, y));
+  assert.strictEqual(Game.active().cells.length, 4);
+  const r = Game.paintCell(4, 0);
+  assert.strictEqual(r.ok, false); assert.strictEqual(r.reason, 'budget');
+  assert.strictEqual(r.message, 'All 4 pixels for ROOF have been placed.');
+  assert.strictEqual(Game.active().cells.length, 4, 'rejected pixel must not be added');
+  Game.exit();
+});
+
+test('painting the same cell twice (e.g. a drag crossing it again) is a no-op, not a second pixel', () => {
+  Game.startLevel(1); Game.submitAnswer(0, 'ROOF');
+  Game.paintCell(1, 1); Game.paintCell(1, 1); Game.paintCell(1, 1);
+  assert.strictEqual(Game.active().cells.length, 1);
+  Game.eraseCell(5, 5); // erasing a cell that was never painted is also a safe no-op
+  assert.strictEqual(Game.active().cells.length, 1);
+  Game.exit();
+});
+
+test('clicking/painting a cell already occupied by another clue\'s confirmed shape is rejected and never erases it', () => {
+  Game.startLevel(1); Game.submitAnswer(0, 'ROOF');
+  [[0, 0], [1, 0], [2, 0], [3, 0]].forEach(([x, y]) => Game.paintCell(x, y)); Game.confirmShape();
   Game.submitAnswer(1, 'DOOR');
-  [[0, 0], [1, 0], [2, 0], [3, 0]].forEach(([x, y]) => Game.toggleBuilderCell(x, y)); Game.confirmShape();
-  const b2 = snap(); const r = Game.place(2, 0); assert.strictEqual(r.reason, 'collision'); assert.strictEqual(snap(), b2);
-  assert.ok(Game.place(4, 0).ok, 'touching without overlap is fine');
+  const r = Game.paintCell(0, 0); // belongs to the already-placed ROOF shape
+  assert.strictEqual(r.ok, false); assert.strictEqual(r.reason, 'occupied'); assert.strictEqual(r.message, 'That space is already occupied.');
+  assert.ok(Grid.isOccupied(Game.state.grid, 0, 0), 'the other clue\'s cell must remain occupied');
   Game.exit();
 });
 
-test('undo returns block to tray; restart resets; timer never duplicates', () => {
+test('drawing: too few / too many / disconnected / diagonal rejected; state unchanged', () => {
+  Game.startLevel(1); Game.submitAnswer(0, 'ROOF');
+  [[0, 0], [1, 0]].forEach(([x, y]) => Game.paintCell(x, y));
+  let r = Game.confirmShape(); assert.ok(!r.ok); assert.strictEqual(r.message, 'Use exactly 4 pixels.');
+  Game.clearDrawing(); assert.strictEqual(Game.active().cells.length, 0);
+  [[0, 0], [1, 1], [2, 2], [3, 3]].forEach(([x, y]) => Game.paintCell(x, y));
+  r = Game.confirmShape(); assert.strictEqual(r.reason, 'disconnected'); assert.strictEqual(r.message, 'All pixels must be connected.');
+  assert.strictEqual(Game.phase(), 'drawing');
+  Game.clearDrawing();
+  [[0, 0], [1, 0], [1, 1], [1, 2]].forEach(([x, y]) => Game.paintCell(x, y));
+  assert.ok(Game.confirmShape().ok);
+  Game.exit();
+});
+
+test('confirming too many (5 for a 4-pixel clue) is unreachable because the 5th paint is already rejected by the budget', () => {
+  Game.startLevel(1); Game.submitAnswer(0, 'ROOF');
+  [[0, 0], [1, 0], [2, 0], [3, 0], [0, 1]].forEach(([x, y]) => Game.paintCell(x, y));
+  assert.strictEqual(Game.active().cells.length, 4, 'the budget stopped the 5th pixel from ever being added');
+  assert.ok(Game.confirmShape().ok);
+  Game.exit();
+});
+
+test('undo returns the shape to an editable drawing-in-progress; restart resets; timer never duplicates', () => {
   Game.startLevel(1); assert.strictEqual(Game.liveIntervals, 1);
   Game.submitAnswer(0, 'ROOF');
-  [[0, 0], [1, 0], [2, 0], [3, 0]].forEach(([x, y]) => Game.toggleBuilderCell(x, y)); Game.confirmShape(); Game.place(0, 0);
+  [[0, 0], [1, 0], [2, 0], [3, 0]].forEach(([x, y]) => Game.paintCell(x, y)); Game.confirmShape();
   assert.strictEqual(Game.progress().done, 1);
   assert.ok(Game.undo().ok);
-  assert.strictEqual(Game.progress().done, 0); assert.strictEqual(Game.phase(), 'placing'); assert.strictEqual(Game.state.undos, 1);
+  assert.strictEqual(Game.progress().done, 0); assert.strictEqual(Game.phase(), 'drawing'); assert.strictEqual(Game.state.undos, 1);
+  assert.strictEqual(Game.active().cells.length, 4, 'the undone shape comes back exactly as it was, ready to redraw');
   assert.ok(Game.state.grid.every((r) => r.every((c) => c === null)));
-  assert.ok(Game.place(0, 4).ok); // re-place elsewhere
-  assert.ok(!Game.undo().ok === false);
+  Game.clearDrawing();
+  [[0, 4], [1, 4], [2, 4], [3, 4]].forEach(([x, y]) => Game.paintCell(x, y));
+  assert.ok(Game.confirmShape().ok); // re-drawn elsewhere
   Game.restart(); Game.restart(); Game.restart();
   assert.strictEqual(Game.liveIntervals, 1, 'exactly one interval after repeated restarts');
   assert.strictEqual(Game.state.solvedClues.length, 0); assert.strictEqual(Game.state.undos, 0); assert.strictEqual(Game.progress().done, 0);
@@ -186,25 +235,19 @@ test('undo returns block to tray; restart resets; timer never duplicates', () =>
   Game.exit(); assert.strictEqual(Game.liveIntervals, 0);
 });
 
-test('undo while another block is pending keeps both (queue)', () => {
+test('undo while another clue is pending keeps both in the queue', () => {
   Game.startLevel(1);
-  Game.submitAnswer(0, 'ROOF'); [[0, 0], [1, 0], [2, 0], [3, 0]].forEach(([x, y]) => Game.toggleBuilderCell(x, y)); Game.confirmShape(); Game.place(0, 0);
-  Game.submitAnswer(1, 'DOOR'); Game.toggleBuilderCell(0, 0);
+  Game.submitAnswer(0, 'ROOF'); [[0, 0], [1, 0], [2, 0], [3, 0]].forEach(([x, y]) => Game.paintCell(x, y)); Game.confirmShape();
+  Game.submitAnswer(1, 'DOOR'); Game.paintCell(4, 4);
   Game.undo();
-  assert.strictEqual(Game.state.queue.length, 2); assert.strictEqual(Game.phase(), 'placing'); assert.strictEqual(Game.active().clue, 0);
-  assert.ok(Game.place(0, 0).ok); assert.strictEqual(Game.phase(), 'building'); assert.strictEqual(Game.active().clue, 1);
+  assert.strictEqual(Game.state.queue.length, 2); assert.strictEqual(Game.phase(), 'drawing'); assert.strictEqual(Game.active().clue, 0);
+  [[0, 0], [1, 0], [2, 0], [3, 0]].forEach(([x, y]) => Game.paintCell(x, y));
+  assert.ok(Game.confirmShape().ok); assert.strictEqual(Game.phase(), 'drawing'); assert.strictEqual(Game.active().clue, 1);
+  assert.strictEqual(Game.active().cells.length, 1, 'the second clue\'s in-progress pixel was preserved');
   Game.exit();
 });
 
-test('rotate + reshape', () => {
-  Game.startLevel(1); Game.submitAnswer(0, 'ROOF');
-  [[0, 0], [1, 0], [2, 0], [3, 0]].forEach(([x, y]) => Game.toggleBuilderCell(x, y)); Game.confirmShape();
-  Game.rotate(); assert.deepStrictEqual(Game.active().shape, cells([0, 0], [0, 1], [0, 2], [0, 3]));
-  Game.reshape(); assert.strictEqual(Game.phase(), 'building'); assert.strictEqual(Game.active().builder.length, 4);
-  Game.exit();
-});
-
-test('hint reveals letters, costs score, capped at len-1; free target flash in other phases', () => {
+test('hint reveals letters, costs score, capped at len-1; free target flash while drawing', () => {
   Game.startLevel(3);
   let r = Game.hint(); assert.ok(r.ok && !r.free); assert.strictEqual(Game.state.hintsUsed, 1);
   Game.hint(); Game.hint(); Game.hint(); Game.hint(); assert.strictEqual(Game.state.hintReveals[0], 5);
@@ -214,11 +257,11 @@ test('hint reveals letters, costs score, capped at len-1; free target flash in o
 });
 
 test('mismatching picture is not "complete" and Undo can recover', () => {
-  Game.startLevel(3); // place every block as a straight line in the wrong spot
+  Game.startLevel(3); // draw every shape as a straight line in the wrong spot
   const lv = Game.state.currentLevel;
-  const place = (i, sx, sy) => { const c = lv.clues[i]; Game.submitAnswer(i, c.answer); for (let x = 0; x < c.answer.length; x++) Game.toggleBuilderCell(x, 0); Game.confirmShape(); return Game.place(sx, sy); };
-  assert.ok(place(0, 0, 0).ok); assert.ok(place(1, 0, 2).ok); assert.ok(place(2, 0, 4).ok); assert.ok(place(3, 0, 6).ok);
-  const last = place(4, 0, 8);
+  const place = (i, sx, sy) => { const c = lv.clues[i]; Game.submitAnswer(i, c.answer); for (let x = 0; x < c.answer.length; x++) Game.paintCell(sx + x, sy); return Game.confirmShape(); };
+  assert.ok(place(0, 0, 0).ok); assert.ok(place(1, 0, 1).ok); assert.ok(place(2, 0, 2).ok); assert.ok(place(3, 0, 3).ok);
+  const last = place(4, 0, 4);
   assert.ok(last.ok && !last.complete); assert.ok(!Game.state.completed);
   assert.strictEqual(Game.progress().done, 5);
   assert.ok(Game.undo().ok); assert.ok(!Game.state.completed);

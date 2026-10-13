@@ -1,4 +1,4 @@
-/* polyomino.js — player-built shapes: connectivity, validation, normalisation. */
+/* polyomino.js — player-drawn shapes: connectivity and validation. */
 (function () {
   const PC = (globalThis.PC = globalThis.PC || {});
   const DIRS = [[0, -1], [0, 1], [-1, 0], [1, 0]]; // UP DOWN LEFT RIGHT — no diagonals
@@ -34,8 +34,7 @@
       const left = new Map(cells.map((c) => [key(c), c]));
       let best = [];
       while (left.size) {
-        const first = left.values().next().value;
-        const comp = Polyomino.reachable([...left.values()], [...left.values()].indexOf(first));
+        const comp = Polyomino.reachable([...left.values()]);
         comp.forEach((c) => left.delete(key(c)));
         if (comp.length > best.length) best = comp;
       }
@@ -54,28 +53,6 @@
         return { valid: false, reason: 'disconnected', message: 'All pixels must be connected.', stray: Polyomino.stray(cells) };
       }
       return { valid: true, reason: null, message: '', stray: [] };
-    },
-
-    /** Shift so the bounding box starts at (0,0); sorted row-major. */
-    normalize(cells) {
-      if (!cells.length) return [];
-      const minX = Math.min(...cells.map((c) => c.x));
-      const minY = Math.min(...cells.map((c) => c.y));
-      return cells.map((c) => ({ x: c.x - minX, y: c.y - minY })).sort((a, b) => a.y - b.y || a.x - b.x);
-    },
-
-    bounds(cells) {
-      return { w: Math.max(...cells.map((c) => c.x)) + 1, h: Math.max(...cells.map((c) => c.y)) + 1 };
-    },
-
-    /** Rotate 90° clockwise, then normalise. */
-    rotate(cells) {
-      return Polyomino.normalize(cells.map((c) => ({ x: -c.y, y: c.x })));
-    },
-
-    /** The cell used as the "handle" for click-to-place: first cell in row-major order. */
-    anchor(cells) {
-      return cells.slice().sort((a, b) => a.y - b.y || a.x - b.x)[0];
     }
   };
 

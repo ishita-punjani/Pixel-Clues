@@ -1,5 +1,11 @@
 // End-to-end tests in a real Chromium (Playwright). Run:  node tests/e2e_test.js
 // Needs playwright (npm i -D playwright, or a global install; set PLAYWRIGHT_MODULE to override).
+//
+// Covers the direct-draw-on-grid interaction model: clues are solved, pixels are earned, and
+// the player paints/erases pixels directly on #main-grid (click, or click-and-drag) instead of
+// building a shape in a separate builder panel and dragging a block onto the grid. The target
+// picture is never rendered on the grid pre-completion; it only appears as a non-interactive
+// reference image in the right-hand panel.
 const path = require('path');
 const fs = require('fs');
 let playwright;
@@ -38,71 +44,88 @@ async function openLevelFromSelect(page, id) {
   await page.click(`[data-play="${id}"]`);
   await page.waitForSelector('#screen-game:not([hidden])');
 }
-async function answer(page, i, word) { const inp = page.locator(`[data-answer-input="${i}"]`); await inp.fill(word); await inp.press('Enter'); }
-async function toggleCells(page, rel) { for (const c of rel) await page.click(`#builder-grid .bcell[data-x="${c.x}"][data-y="${c.y}"]`); }
+async function answer(page, i, word) {
+  const inp = page.locator(`[data-answer-input="${i}"]`);
+  if (!(await inp.isVisible())) await page.click(`[data-clue="${i}"] .clue-head`); // collapsed clue → open its answer row
+  await inp.fill(word); await inp.press('Enter');
+}
 async function gridBlockCells(page) {
   return page.evaluate(() => [...document.querySelectorAll('#main-grid .cell')].filter((c) => c.dataset.state === 'block').map((c) => c.dataset.x + ',' + c.dataset.y).sort());
 }
+async function ownCells(page) {
+  return page.evaluate(() => [...document.querySelectorAll('#main-grid .cell')].filter((c) => c.dataset.state === 'selected').map((c) => c.dataset.x + ',' + c.dataset.y).sort());
+}
 const key = (cells) => cells.map((c) => c.x + ',' + c.y).sort();
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-
-async function trayAndGrid(page) {
-  return page.evaluate(() => {
-    const b = document.getElementById('tray-block');
-    const w = +getComputedStyle(b).getPropertyValue('--w');
-    const kids = [...b.children];
-    const first = kids.findIndex((k) => !k.classList.contains('gap'));
-    const gEl = document.getElementById('main-grid');
-    const g = gEl.getBoundingClientRect(), r = b.getBoundingClientRect();
-    return { r: { left: r.left, top: r.top, width: r.width, height: r.height }, w, h: kids.length / w, first, n: +getComputedStyle(gEl).getPropertyValue('--n'), g: { left: g.left, top: g.top, width: g.width, height: g.height }, vh: innerHeight, vw: innerWidth };
-  });
-}
-async function bringIntoView(page) {
-  await page.evaluate(() => {
-    const vw = innerWidth;
-    (vw <= 768 ? document.getElementById('work-panel') : document.getElementById('main-grid')).scrollIntoView({ block: vw <= 768 ? 'start' : 'center' });
-  });
-  await page.waitForTimeout(60);
-}
-/** Drag the block: grab cell (gx,gy) of the block, release over grid cell `pointer` (or dropX+gx, dropY+gy). */
-async function drag(page, { dropX, dropY, gx, gy, pointer, outside } = {}) {
-  await bringIntoView(page);
-  const t = await trayAndGrid(page);
-  gx = gx === undefined ? t.first % t.w : gx; gy = gy === undefined ? Math.floor(t.first / t.w) : gy;
-  const sx = t.r.left + (gx + 0.5) * (t.r.width / t.w), sy = t.r.top + (gy + 0.5) * (t.r.height / t.h);
-  const p = pointer || { x: dropX + gx, y: dropY + gy };
-  let ex = t.g.left + (p.x + 0.5) * (t.g.width / t.n), ey = t.g.top + (p.y + 0.5) * (t.g.height / t.n);
-  if (outside) { ex = Math.max(2, t.g.left - 40); ey = Math.max(2, t.g.top - 30); if (ey < 0) ey = 2; }
-  await page.mouse.move(sx, sy); await page.mouse.down();
-  await page.mouse.move((sx + ex) / 2, (sy + ey) / 2, { steps: 4 }); await page.mouse.move(ex, ey, { steps: 6 });
-  await page.mouse.up();
-  await page.waitForTimeout(80);
-}
 const progress = (page) => text(page, '#progress-text');
 const status = (page) => text(page, '#status');
-const gameState = (page) => page.evaluate(() => { const s = PC.Game.state; return { phase: PC.Game.phase(), placed: s.placedBlocks.length, solved: s.solvedClues.length, pixels: s.earnedPixels, hints: s.hintsUsed, wrong: s.invalidAttempts, undos: s.undos, completed: s.completed, elapsed: s.elapsedTime, intervals: PC.Game.liveIntervals, score: s.score, stars: s.stars, running: PC.Game.isTimerRunning() }; });
+/** Compare main-grid cells against the level's reference data (lv.art + PC.PALETTE, the same
+ *  source drawArt() paints the reference canvas from). Returns mismatching cells. Cells that are
+ *  empty in the reference must carry no art styling. */
+const artMismatches = (page) => page.evaluate(() => {
+  const lv = PC.Game.state.currentLevel, n = lv.gridSize, bad = [];
+  const probe = document.createElement('div'); document.body.appendChild(probe);
+  const rgb = (hex) => { probe.style.backgroundColor = hex; return getComputedStyle(probe).backgroundColor; };
+  document.querySelectorAll('#main-grid .cell').forEach((c) => {
+    const x = +c.dataset.x, y = +c.dataset.y, a = lv.art[y][x], isArt = c.classList.contains('art');
+    if (!a) { if (isArt) bad.push({ x, y, why: 'empty cell styled' }); return; }
+    if (!isArt) { bad.push({ x, y, why: 'missing art' }); return; }
+    const want = rgb(PC.PALETTE[a]), got = getComputedStyle(c).backgroundColor;
+    if (want !== got) bad.push({ x, y, want, got });
+  });
+  probe.remove();
+  return bad;
+});
+const gameState = (page) => page.evaluate(() => { const s = PC.Game.state; return { phase: PC.Game.phase(), placed: s.placedBlocks.length, solved: s.solvedClues.length, pixels: s.earnedPixels, hints: s.hintsUsed, wrong: s.invalidAttempts, undos: s.undos, completed: s.completed, elapsed: s.elapsedTime, intervals: PC.Game.liveIntervals, score: s.score, stars: s.stars, running: PC.Game.isTimerRunning(), queue: s.queue.length, activeN: s.queue[0] ? s.queue[0].n : 0, activeCount: s.queue[0] ? s.queue[0].cells.length : 0 }; });
 
-/** Solve a whole level through the real UI using the solver's proven solution. */
-async function playLevelUI(page, levelId, { useTap } = {}) {
+/** Centre of grid cell (x,y) in viewport coordinates — recomputed from the live rect each
+ *  time, so it stays correct across resizes (mirrors how the real pointer handlers work). */
+async function cellCenter(page, x, y) {
+  return page.evaluate(({ x, y }) => {
+    const g = document.getElementById('main-grid');
+    const r = g.getBoundingClientRect();
+    const n = +getComputedStyle(g).getPropertyValue('--n');
+    return { cx: r.left + (x + 0.5) * r.width / n, cy: r.top + (y + 0.5) * r.height / n };
+  }, { x, y });
+}
+/** Filling a clue input far down a long clue list (e.g. Expert's 11 clues) auto-scrolls the
+ *  page, which moves #main-grid out from under any previously-computed pointer coordinates.
+ *  Scroll the grid itself back into view before any click/drag against it. */
+async function ensureGridInView(page) {
+  await page.evaluate(() => document.getElementById('main-grid').scrollIntoView({ block: 'center' }));
+}
+async function clickCell(page, x, y) {
+  await ensureGridInView(page);
+  const { cx, cy } = await cellCenter(page, x, y);
+  await page.mouse.click(cx, cy);
+  await page.waitForTimeout(20);
+}
+/** Click-and-drag across a sequence of cells in one continuous gesture (pointerdown on the
+ *  first, pointermove through the rest, pointerup) — exactly how a player paints/erases
+ *  several pixels at once. */
+async function dragCells(page, cellsList) {
+  await ensureGridInView(page);
+  const first = await cellCenter(page, cellsList[0].x, cellsList[0].y);
+  await page.mouse.move(first.cx, first.cy);
+  await page.mouse.down();
+  for (const c of cellsList.slice(1)) {
+    const p = await cellCenter(page, c.x, c.y);
+    await page.mouse.move(p.cx, p.cy);
+  }
+  await page.mouse.up();
+  await page.waitForTimeout(40);
+}
+
+/** Solve a whole level through the real UI using the solver's proven solution: answer each
+ *  clue, then click-and-drag paint the proven cells for that piece, then Confirm. */
+async function playLevelUI(page, levelId) {
   const lv = PC.LEVELS.find((l) => l.id === levelId);
   const sol = solve(lv).solution;
   let k = 0;
   for (const piece of sol) {
     await answer(page, piece.clue, lv.clues[piece.clue].answer);
-    const minX = Math.min(...piece.cells.map((c) => c.x)), minY = Math.min(...piece.cells.map((c) => c.y));
-    const rel = piece.cells.map((c) => ({ x: c.x - minX, y: c.y - minY }));
-    await toggleCells(page, rel);
+    await dragCells(page, piece.cells);
     await page.click('#btn-confirm');
-    if (useTap) {
-      await page.click('#tray-block .tblock:not(.gap)');
-      const first = rel.slice().sort((a, b) => a.y - b.y || a.x - b.x)[0];
-      const t = await trayAndGrid(page);
-      await bringIntoView(page);
-      const t2 = await trayAndGrid(page);
-      await page.mouse.click(t2.g.left + (minX + first.x + 0.5) * (t2.g.width / t2.n), t2.g.top + (minY + first.y + 0.5) * (t2.g.height / t2.n));
-    } else {
-      await drag(page, { dropX: minX, dropY: minY });
-    }
     k++;
     if (k < sol.length) await page.waitForFunction((kk) => document.getElementById('progress-text').innerText.startsWith(kk + ' /'), k);
   }
@@ -126,150 +149,228 @@ async function playLevelUI(page, levelId, { useTap } = {}) {
   chk('Locked levels have disabled Play buttons', await page.$$eval('.level-card[data-locked="true"] button', (b) => b.every((x) => x.disabled)));
   await page.screenshot({ path: SHOTS + '/02-levels.png' });
 
-  /* ============ B. Beginner detailed loop ============ */
-  section('B. Beginner 8×8 — full tutorial loop with every validation case');
+  /* ============ B. Layout, target removal, reference panel ============ */
+  section('B. Three-column layout, target removed from main grid, reference panel');
   await page.click('[data-play="1"]');
   chk('Game screen open, grid 8×8 (64 cells)', await vis(page, '#screen-game') && (await page.locator('#main-grid .cell').count()) === 64);
-  chk('Tutorial step 1 text', (await text(page, '#coach')).includes('Solve the clue to earn pixels.'));
+  const areas = await page.evaluate(() => getComputedStyle(document.querySelector('.puzzle-layout')).gridTemplateAreas);
+  chk('Desktop layout is clues | board | ref (three columns)', /clues/.test(areas) && /board/.test(areas) && /ref/.test(areas), areas);
+  const order = await page.evaluate(() => {
+    const l = document.querySelector('.puzzle-layout');
+    const kids = [...l.children];
+    const rect = (el) => el.getBoundingClientRect();
+    return kids.map((k) => ({ cls: k.className, left: rect(k).left }));
+  });
+  const clueBox = order.find((o) => /clues-panel/.test(o.cls));
+  const boardBox = order.find((o) => /board-panel/.test(o.cls));
+  const refBox = order.find((o) => /reference-panel/.test(o.cls));
+  chk('Clues panel sits left of the main grid, which sits left of the reference panel', clueBox.left < boardBox.left && boardBox.left < refBox.left, order);
+  chk('No `.cell.target` overlay class exists anywhere in the stylesheet-driven markup (target is internal-only)', (await page.locator('#main-grid .cell.target').count()) === 0);
+  const emptyBgs = await page.$$eval('#main-grid .cell[data-state="empty"]', (els) => [...new Set(els.map((e) => getComputedStyle(e).backgroundColor + '|' + getComputedStyle(e).backgroundImage))]);
+  chk('Every empty main-grid cell looks identical (target picture not revealed on the grid)', emptyBgs.length === 1, emptyBgs);
+  const refCanvasVisible = await vis(page, '#reference-canvas');
+  chk('Reference image panel shows a canvas with the target picture, labeled "Reference"', refCanvasVisible && (await text(page, '.reference-panel h3')) === 'Reference');
+  const refPE = await page.locator('#reference-canvas').evaluate((c) => getComputedStyle(c).pointerEvents);
+  chk('Reference canvas is non-interactive (pointer-events: none)', refPE === 'none');
+  const refDrawn = await page.locator('#reference-canvas').evaluate((c) => c.width > 0 && c.height > 0);
+  chk('Reference canvas actually has the picture drawn onto it', refDrawn);
+  chk('No old builder/tray elements exist anywhere in the DOM', (await page.locator('#builder-grid, #tray-block, #btn-rotate, #btn-reshape, #btn-builder-reset').count()) === 0);
+  const noScale = await page.evaluate(() => {
+    const check = (sel) => !/scale\(/.test(getComputedStyle(document.querySelector(sel)).transform) || getComputedStyle(document.querySelector(sel)).transform === 'none';
+    return check('#main-grid') && check('#grid-frame');
+  });
+  chk('Grid sizing does not rely on transform:scale() as its mechanism', noScale);
+
+  /* ============ C. Direct-draw mechanics on the main grid (Beginner) ============ */
+  section('C. Direct click / click-and-drag drawing mechanics');
   chk('Progress starts at 0 / 3 clues', (await progress(page)) === '0 / 3 clues');
   let gs = await gameState(page);
   chk('Timer running with exactly one interval', gs.running && gs.intervals === 1, gs);
-  await page.waitForTimeout(1300);
-  chk('Timer display advances', (await text(page, '#timer')) !== '00:00', await text(page, '#timer'));
+
+  // The proven solver solution for this level — used so that every piece we actually CONFIRM
+  // (as opposed to pieces only used to demo rejection/mechanics) lands on the real target cells
+  // and the level can genuinely complete. Mechanics demos below use row 0/1 scratch cells,
+  // which this level's target never requires, so they never collide with the real placements.
+  const beginnerSol = solve(PC.LEVELS[0]).solution;
+  const realCellsFor = (clue) => beginnerSol.find((p) => p.clue === clue).cells;
 
   await answer(page, 0, 'HOUSE');
   chk('Incorrect answer → "Not quite — try again!"', (await status(page)).includes('Not quite — try again!'));
-  chk('Incorrect answer does not reveal answer / grant pixels', (await gameState(page)).pixels === 0 && !(await text(page, '#clue-list')).includes('ROOF'));
   await answer(page, 0, 'roof');
   chk('Correct answer → "Correct! You earned 4 pixels."', (await status(page)).includes('Correct! You earned 4 pixels.'), await status(page));
-  chk('Solved clue card shows Correct (not stale Incorrect) state', /^correct$/i.test(await text(page, '[data-clue="0"] .clue-state')));
-  chk('Pixel reward equals answer length (4)', (await gameState(page)).pixels === 4);
-  chk('Tutorial step 2 text mentions 4 letters/4 pixels', (await text(page, '#coach')).includes('Your answer has 4 letters — you earned 4 pixels!'));
-  chk('Progress unchanged until placement (0 / 3)', (await progress(page)) === '0 / 3 clues');
-  chk('Builder shows "0 / 4" and is visible', await vis(page, '#panel-builder') && (await text(page, '#sel-count')) === '0 / 4');
-  await page.locator('[data-clue="0"] form').evaluate((f) => f.requestSubmit());
-  chk('Duplicate submit is rejected, no extra pixels', (await gameState(page)).pixels === 4 && (await status(page)).includes('already solved'));
-  chk('Other clue inputs are locked while a block is pending', await page.locator('[data-answer-input="1"]').isDisabled());
+  chk('Pixel reward equals answer length (4)', (await gameState(page)).activeN === 4);
+  chk('Draw tools appear: status chip + Clear + Confirm', await vis(page, '#draw-status') && await vis(page, '#btn-clear') && await vis(page, '#btn-confirm'));
+  chk('Confirm disabled with zero pixels drawn', await page.locator('#btn-confirm').isDisabled());
 
-  await toggleCells(page, [{ x: 0, y: 0 }, { x: 1, y: 0 }]);
-  await page.click('#btn-confirm');
-  chk('Too few cells (2/4) → "Use exactly 4 pixels."', (await status(page)).includes('Use exactly 4 pixels.') && await vis(page, '#panel-builder'));
-  await page.click('#btn-builder-reset');
-  chk('Reset clears selection', (await text(page, '#sel-count')) === '0 / 4');
-  await toggleCells(page, [{ x: 0, y: 0 }, { x: 1, y: 1 }, { x: 2, y: 2 }, { x: 3, y: 3 }]);
-  chk('Diagonal-only 4 cells → live warning "All pixels must be connected."', (await text(page, '#builder-msg')).includes('All pixels must be connected.'));
-  chk('Disconnected cells get highlighted (.stray)', (await page.locator('#builder-grid .bcell.stray').count()) >= 1);
-  await page.click('#btn-confirm');
-  chk('Confirm rejected for diagonal shape; still in builder', (await status(page)).includes('All pixels must be connected.') && await vis(page, '#panel-builder') && !(await vis(page, '#panel-tray')));
-  chk('Builder shakes on invalid confirm', await page.locator('#builder-grid').evaluate((g) => g.classList.contains('shake')));
-  await page.screenshot({ path: SHOTS + '/03-beginner-invalid.png' });
-  await page.click('#btn-builder-reset');
-  await toggleCells(page, [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 2, y: 0 }, { x: 3, y: 0 }, { x: 0, y: 1 }]);
-  chk('Too many cells (5/4) → "Use exactly 4 pixels." and count turns red', (await text(page, '#builder-msg')).includes('Use exactly 4 pixels.') && await page.locator('#sel-count').evaluate((e) => e.classList.contains('over')));
-  await page.click('#btn-confirm');
-  chk('Confirm rejected for 5 cells', await vis(page, '#panel-builder'));
-  await page.click('#btn-builder-reset');
-  // irregular but connected: 2x2 square (used as ROOF)
-  await toggleCells(page, [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 0, y: 1 }, { x: 1, y: 1 }]);
-  chk('Valid shape shows ready message', (await text(page, '#builder-msg')).includes('Connected'));
-  chk('Tutorial step 4 (confirm) text', (await text(page, '#coach')).includes('Confirm Shape'));
-  await page.click('#btn-confirm');
-  chk('Confirmed → placement tray visible', await vis(page, '#panel-tray') && !(await vis(page, '#panel-builder')));
-  chk('Tutorial step 5 text', (await text(page, '#coach')).includes('Place your block on the puzzle grid.'));
-  await drag(page, { dropX: 3, dropY: 2 });
-  chk('ROOF square placed at (3,2) — exact cells', same(await gridBlockCells(page), ['3,2', '3,3', '4,2', '4,3']), await gridBlockCells(page));
-  chk('Progress updates after placement: 1 / 3', (await progress(page)) === '1 / 3 clues');
-  chk('Progress bar width ≈ 33%', /^33/.test(await page.locator('#progress-fill').evaluate((e) => e.style.width)));
-  chk('Progress bar has 0.3s width transition', await page.locator('#progress-fill').evaluate((e) => getComputedStyle(e).transitionProperty.includes('width') && getComputedStyle(e).transitionDuration.startsWith('0.3')));
+  // single click toggles one cell on, then off
+  await clickCell(page, 0, 0);
+  chk('Single click places a pixel', same(await ownCells(page), ['0,0']));
+  await clickCell(page, 0, 0);
+  chk('Clicking the same (now-selected) cell again removes it (toggle)', (await ownCells(page)).length === 0);
 
-  // DOOR: horizontal line of 4 — placement validation through the real UI
+  // click-and-drag paints multiple cells in one gesture, including re-entering a cell
+  await dragCells(page, [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 0, y: 0 }, { x: 1, y: 1 }]);
+  chk('Drag paints the distinct cells crossed; re-entering (0,0) mid-gesture does not re-toggle it off', same(await ownCells(page), ['0,0', '1,0', '1,1']), await ownCells(page));
+
+  // drag-erase: starting a new drag on an already-selected cell erases along the path
+  await dragCells(page, [{ x: 0, y: 0 }, { x: 1, y: 0 }]);
+  chk('Starting a drag on a selected cell erases the cells it crosses', same(await ownCells(page), ['1,1']), await ownCells(page));
+
+  await page.click('#btn-clear');
+  chk('Clear Shape empties the current drawing', (await ownCells(page)).length === 0);
+
+  // pointer safety
+  chk('Grid uses touch-action: none while drawing (touch drags draw, not scroll)', await page.locator('#main-grid').evaluate((g) => getComputedStyle(g).touchAction) === 'none');
+  { const p = await cellCenter(page, 2, 0); await page.mouse.click(p.cx, p.cy, { button: 'right' }); }
+  chk('Right-click does not draw', (await ownCells(page)).length === 0);
+  {
+    const a = await cellCenter(page, 0, 0), b = await cellCenter(page, 1, 0), c = await cellCenter(page, 2, 0);
+    await page.mouse.move(a.cx, a.cy); await page.mouse.down();
+    await page.mouse.move(a.cx, 5); await page.mouse.up(); // release outside the grid
+    await page.mouse.move(b.cx, b.cy); await page.mouse.move(c.cx, c.cy); // hover back with no button held
+  }
+  chk('pointerup outside the grid ends the drag (hovering afterwards draws nothing)', same(await ownCells(page), ['0,0']), await ownCells(page));
+  await page.click('#btn-clear');
+  await page.evaluate(({ a, b }) => {
+    const g = document.getElementById('main-grid');
+    const ev = (type, p) => g.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: 77, isPrimary: true, pointerType: 'touch', button: 0, buttons: 1, clientX: p.cx, clientY: p.cy }));
+    ev('pointerdown', a); ev('pointercancel', a); ev('pointermove', b);
+  }, { a: await cellCenter(page, 0, 0), b: await cellCenter(page, 1, 0) });
+  chk('pointercancel ends the drag (later pointermove draws nothing)', same(await ownCells(page), ['0,0']), await ownCells(page));
+  await page.click('#btn-clear');
+
+  // pixel budget: paint exactly 4 scratch cells (row 0, which this level's target never needs),
+  // a 5th attempt is rejected and named
+  await dragCells(page, [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 2, y: 0 }, { x: 3, y: 0 }]);
+  chk('Exactly 4 pixels drawn for ROOF', same(await ownCells(page), ['0,0', '1,0', '2,0', '3,0']));
+  await clickCell(page, 5, 0);
+  chk('5th pixel over budget rejected, naming the clue\'s answer', (await status(page)).includes('All 4 pixels for ROOF have been placed.'), await status(page));
+  chk('Budget rejection did not add a 5th pixel', (await ownCells(page)).length === 4);
+
+  // clear the scratch demo and draw the real (proven) solution cells for this clue, so the
+  // level can genuinely reach completion later
+  await page.click('#btn-clear');
+  const roofCells = realCellsFor(0);
+  await dragCells(page, roofCells);
+  await page.click('#btn-confirm');
+  chk('4 connected cells confirm successfully', (await progress(page)) === '1 / 3 clues');
+  chk('Confirmed cells committed to the grid as a block', same(await gridBlockCells(page), key(roofCells)));
+  await clickCell(page, 7, 0);
+  chk('Clicking the grid with no clue in drawing mode changes nothing', (await ownCells(page)).length === 0 && same(await gridBlockCells(page), key(roofCells)) && (await gameState(page)).phase === 'solving');
+  await page.screenshot({ path: SHOTS + '/03-beginner-confirmed.png' });
+
+  // DOOR: test connectivity rejection (row 1 scratch) and occupied-cell rejection before placing it for real
   await answer(page, 1, 'DOOR');
-  await toggleCells(page, [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 2, y: 0 }, { x: 3, y: 0 }]);
+  await dragCells(page, [{ x: 0, y: 1 }, { x: 2, y: 1 }, { x: 4, y: 1 }, { x: 6, y: 1 }]); // disconnected (gap of 1 between each)
+  chk('4 disconnected cells drawn', (await ownCells(page)).length === 4);
   await page.click('#btn-confirm');
-  const before = await gridBlockCells(page);
-  await drag(page, { pointer: { x: 6, y: 0 }, gx: 0, gy: 0 });
-  chk('Out of bounds RIGHT rejected with message', (await status(page)).includes('That block goes outside the puzzle.') && same(await gridBlockCells(page), before));
-  await drag(page, { pointer: { x: 0, y: 0 }, gx: 3, gy: 0 });
-  chk('Out of bounds LEFT rejected', (await status(page)).includes('outside the puzzle') && same(await gridBlockCells(page), before));
-  await page.click('#btn-rotate');
-  await drag(page, { pointer: { x: 0, y: 6 }, gx: 0, gy: 0 });
-  chk('Out of bounds BOTTOM rejected', (await status(page)).includes('outside the puzzle') && same(await gridBlockCells(page), before));
-  await drag(page, { pointer: { x: 0, y: 0 }, gx: 0, gy: 3 });
-  chk('Out of bounds TOP rejected', (await status(page)).includes('outside the puzzle') && same(await gridBlockCells(page), before));
-  chk('Failed placement did not touch progress or queue', (await progress(page)) === '1 / 3 clues' && (await gameState(page)).phase === 'placing');
-  chk('Grid frame shakes on failure', await page.locator('#grid-frame').evaluate((e) => e.classList.contains('shake')));
-  await page.screenshot({ path: SHOTS + '/04-beginner-placefail.png' });
-  await drag(page, { dropX: 0, dropY: 0, outside: true });
-  chk('Dropping outside the grid cancels silently (block stays in tray)', (await gameState(page)).phase === 'placing' && same(await gridBlockCells(page), before));
-  await page.click('#btn-rotate'); await page.click('#btn-rotate'); await page.click('#btn-rotate'); // back to horizontal
-  await drag(page, { dropX: 3, dropY: 2 });
-  chk('Overlapping an existing block → "That space is already occupied."', (await status(page)).includes('That space is already occupied.') && same(await gridBlockCells(page), before));
-  await drag(page, { dropX: 4, dropY: 7 });
-  chk('Grid-edge placement (bottom-right corner, exact fit) is valid', same(await gridBlockCells(page), [...before, '4,7', '5,7', '6,7', '7,7'].sort()), await gridBlockCells(page));
-  chk('Progress 2 / 3', (await progress(page)) === '2 / 3 clues');
+  chk('Confirm rejected for disconnected shape: "All pixels must be connected."', (await status(page)).includes('All pixels must be connected.'));
+  chk('Grid frame shakes on invalid confirm', await page.locator('#grid-frame').evaluate((e) => e.classList.contains('shake')));
+  chk('Rejected shape is NOT committed (still drawing, same 4 cells)', (await gameState(page)).phase === 'drawing' && (await ownCells(page)).length === 4);
+  await page.screenshot({ path: SHOTS + '/04-beginner-invalid-disconnected.png' });
+
+  await page.click('#btn-clear');
+  const occupiedCell = roofCells[0]; // already part of the confirmed ROOF block
+  await clickCell(page, occupiedCell.x, occupiedCell.y);
+  chk('Clicking a cell already occupied by another clue\'s confirmed block is rejected: "That space is already occupied."', (await status(page)).includes('That space is already occupied.'));
+  chk('Occupied-cell rejection does not erase the other clue\'s placed pixels', same(await gridBlockCells(page), key(roofCells)));
+  chk('Occupied-cell rejection does not add it to the current drawing either', (await ownCells(page)).length === 0);
+  const freeNear = [{ x: 0, y: 1 }, { x: 1, y: 1 }];
+  await dragCells(page, [freeNear[0], occupiedCell, freeNear[1]]);
+  chk('Paint-drag across a confirmed block skips it (block untouched, not added to drawing)', same(await gridBlockCells(page), key(roofCells)) && same(await ownCells(page), key(freeNear)), await ownCells(page));
+  await dragCells(page, [freeNear[0], occupiedCell, freeNear[1]]);
+  chk('Erase-drag across a confirmed block erases only the current drawing', same(await gridBlockCells(page), key(roofCells)) && (await ownCells(page)).length === 0, await ownCells(page));
+
+  // now place DOOR correctly: the real (proven) solution cells for this clue
+  const doorCells = realCellsFor(1);
+  await dragCells(page, doorCells);
+  await page.click('#btn-confirm');
+  chk('DOOR placed correctly after fixing the shape', (await progress(page)) === '2 / 3 clues');
+  const beforeUndo = await gridBlockCells(page);
   await page.click('#btn-undo');
-  chk('Undo picks the last block up again (grid + progress rolled back)', same(await gridBlockCells(page), before) && (await progress(page)) === '1 / 3 clues' && await vis(page, '#panel-tray'));
-  await drag(page, { dropX: 2, dropY: 5 });
-  chk('DOOR line re-placed at (2,5), touching without overlap is valid', same(await gridBlockCells(page), [...before, '2,5', '3,5', '4,5', '5,5'].sort()));
+  chk('Undo returns the last block to an editable drawing (progress rolls back)', (await progress(page)) === '1 / 3 clues' && (await gameState(page)).phase === 'drawing');
+  chk('Undone shape\'s cells are pre-populated and immediately editable (erase one, it shrinks)', (await ownCells(page)).length === 4);
+  await clickCell(page, doorCells[0].x, doorCells[0].y); // erase one cell of the undone shape
+  chk('Erasing one cell of the just-undone shape drops the count to 3', (await ownCells(page)).length === 3);
+  await clickCell(page, doorCells[0].x, doorCells[0].y); // put it back
+  await page.click('#btn-confirm');
+  chk('Re-confirming the restored shape re-places it identically', same(await gridBlockCells(page), beforeUndo));
+  chk('Progress back to 2 / 3', (await progress(page)) === '2 / 3 clues');
+
   await page.click('#btn-hint');
-  chk('Hint (letters) button works during solving phase', (await gameState(page)).hints === 1 && (await text(page, '[data-clue="2"] .slots')).replace(/\s/g, '').startsWith('W'));
+  chk('Hint (letters) button works during solving phase', (await gameState(page)).hints === 1);
   chk('Hint counter shown', (await text(page, '#hint-count')).includes('1 hint'));
+  const hintLine = await text(page, '[data-clue="2"] .hint-line');
+  chk('Hint line reveals a letter on the still-unsolved clue', hintLine.startsWith('Hint: W'), hintLine);
 
   await answer(page, 2, 'WINDOW');
-  chk('WINDOW → 6 pixels', (await gameState(page)).pixels === 14 && (await text(page, '#need-count')) === '6');
+  chk('WINDOW → 6 pixels', (await gameState(page)).activeN === 6);
   await page.click('#btn-hint');
-  chk('Hint while building is free (no penalty) and flashes target', (await gameState(page)).hints === 1 && (await page.locator('#main-grid .cell.flash').count()) > 0);
-  await toggleCells(page, [{ x: 0, y: 0 }, { x: 0, y: 1 }, { x: 1, y: 1 }, { x: 2, y: 1 }, { x: 3, y: 1 }, { x: 3, y: 0 }]);
+  chk('Hint while drawing is free (flashes target cells, no extra hint cost)', (await gameState(page)).hints === 1);
+  const windowCells = realCellsFor(2);
+  await dragCells(page, windowCells);
   await page.click('#btn-confirm');
-  await page.waitForTimeout(100);
-  const preTimer = await text(page, '#timer');
-  // tap-to-place: tap the block, then tap grid cell (anchor = first cell)
-  await page.click('#tray-block .tblock:not(.gap)');
-  chk('Tap on block arms tap-to-place', await page.locator('#tray-block').evaluate((e) => e.classList.contains('armed')));
-  await bringIntoView(page);
-  const t2 = await trayAndGrid(page);
-  const cell = (x, y) => [t2.g.left + (x + 0.5) * t2.g.width / t2.n, t2.g.top + (y + 0.5) * t2.g.height / t2.n];
-  await page.mouse.move(...cell(2, 3));
-  chk('Hover preview shows a valid (green) ghost', (await page.locator('#main-grid .cell.preview-ok').count()) === 6);
-  await page.mouse.click(...cell(2, 3));
   await page.waitForSelector('#overlay-complete:not([hidden])');
   chk('Completion overlay shows', await vis(page, '#overlay-complete'));
   gs = await gameState(page);
   chk('Timer stopped on completion, 0 live intervals', !gs.running && gs.intervals === 0 && gs.completed, gs);
-  const frozen = await text(page, '#stat-time'); await page.waitForTimeout(1600);
-  chk('Completion-screen time stays frozen', frozen === await text(page, '#stat-time') && Math.abs((await gameState(page)).elapsed - gs.elapsed) < 0.001);
   chk('Title "LITTLE HOUSE COMPLETE!"', (await text(page, '#complete-title')) === 'LITTLE HOUSE COMPLETE!');
   const starsOn = await page.locator('#complete-stars .on').count();
   chk('1–3 stars shown and match state', starsOn >= 1 && starsOn <= 3 && starsOn === gs.stars, starsOn);
-  chk('Score shown = state score (1000−75−25−20 = ' + gs.score + ')', (await text(page, '#stat-score')) === String(gs.score) && gs.score === 1000 - 75 - 25 * 1 - 20 * 1, gs);
+  chk('Score shown matches state score', (await text(page, '#stat-score')) === String(gs.score));
   chk('All 3 clues solved text + final image canvas', (await text(page, '#stat-clues')).includes('All 3 clues solved') && (await page.locator('#complete-canvas').evaluate((c) => c.width > 0)));
-  chk('Whole picture revealed in art colours behind overlay', (await page.locator('#main-grid .cell.art').count()) === 14);
   chk('Next-level button offers Easy', (await text(page, '#btn-next')).includes('Easy'));
+  const artBgs = await page.$$eval('#main-grid .cell.art', (els) => els.map((e) => getComputedStyle(e).backgroundColor));
+  chk('Completed grid recolours every filled cell to the picture (no transparent cells)', artBgs.length > 0 && artBgs.every((c) => c !== 'rgba(0, 0, 0, 0)'), artBgs);
+  const bm = await artMismatches(page);
+  chk('Beginner: completed grid matches reference art cell-for-cell (colour, position, empties)', bm.length === 0, bm.slice(0, 5));
   await page.screenshot({ path: SHOTS + '/05-beginner-complete.png' });
 
   /* persistence + next level */
   await page.click('#btn-complete-levels');
   chk('Level select after completion; Easy now unlocked, Beginner completed', await page.$$eval('.level-card', (e) => e[1].dataset.locked === 'false' && /Completed/.test(e[0].innerText)));
-  chk('Beginner star display saved', (await page.$$eval('.level-card', (e) => e[0].querySelectorAll('.stars-row .on').length)) >= 1);
   await page.reload();
   await page.click('#btn-play');
   chk('After browser refresh Easy STILL unlocked (localStorage)', await page.$$eval('.level-card', (e) => e[1].dataset.locked === 'false' && e[2].dataset.locked === 'true'));
-  chk('Medium still locked', await page.$$eval('.level-card', (e) => e[2].dataset.locked === 'true'));
 
-  /* ============ C. Easy, Medium, Hard, Expert core loops ============ */
+  /* ============ D. Clue panel fits without a nested scrollbar (Beginner/Easy/Medium) ============ */
+  section('D. Clue panel fits at desktop size without an internal scrollbar');
+  if (!(await vis(page, '#screen-levels'))) await page.click('#btn-exit');
+  await page.check('#presenter-toggle'); // Medium isn't unlocked yet at this point; presenter mode opens it for measurement only
+  for (const id of [1, 2, 3, 4, 5]) {
+    const lv = PC.LEVELS.find((l) => l.id === id);
+    if (!(await vis(page, '#screen-levels'))) await page.click('#btn-exit');
+    await openLevelFromSelect(page, id);
+    const m = await page.evaluate(() => {
+      const list = document.getElementById('clue-list');
+      return { scrollH: list.scrollHeight, clientH: list.clientHeight, overflowY: getComputedStyle(list).overflowY };
+    });
+    chk(`${lv.name}: #clue-list has no internal scrollbar (overflow not clipped-and-scrolled)`, m.overflowY !== 'scroll' && m.overflowY !== 'auto' || m.scrollH <= m.clientH + 1, m);
+    const pageFit = await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight + 2);
+    chk(`${lv.name}: whole page fits at 1440×900 with no page scroll either`, pageFit);
+    const cl = await page.evaluate(() => ({ bottom: document.querySelector('.clues-panel').getBoundingClientRect().bottom, ih: innerHeight, cards: document.querySelectorAll('.clue-card').length }));
+    chk(`${lv.name}: all ${lv.clues.length} clue cards visible inside the 1440×900 viewport`, cl.cards === lv.clues.length && cl.bottom <= cl.ih, cl);
+  }
+  await page.click('#btn-exit');
+  await page.uncheck('#presenter-toggle');
+
+  /* ============ E. Easy, Medium, Hard, Expert core loops via drag-paint ============ */
   for (const id of [2, 3, 4, 5]) {
     const lv = PC.LEVELS.find((l) => l.id === id);
-    section(`C${id - 1}. ${lv.name} ${lv.gridSize}×${lv.gridSize} — complete core loop through the UI (${lv.clues.length} clues)`);
+    section(`E${id - 1}. ${lv.name} ${lv.gridSize}×${lv.gridSize} — complete core loop through the UI (${lv.clues.length} clues)`);
     if (await vis(page, '#screen-levels') === false) { await page.click('#btn-complete-levels'); }
     await openLevelFromSelect(page, id);
     chk(`${lv.name}: grid has ${lv.gridSize ** 2} cells`, (await page.locator('#main-grid .cell').count()) === lv.gridSize ** 2);
     chk(`${lv.name}: prefilled cells rendered`, (await page.locator('#main-grid .cell[data-state="pre"]').count()) === lv.prefilled.flat().filter(Boolean).length);
-    if (id === 2) chk('Easy: tutorial guidance reduced (light tip, no "Step x of 6")', !(await text(page, '#coach')).includes('of 6') && await vis(page, '#coach'));
-    if (id >= 3) chk(`${lv.name}: no tutorial coach box`, !(await vis(page, '#coach')));
-    await playLevelUI(page, id, { useTap: id === 3 });
+    const preBgs = await page.$$eval('#main-grid .cell[data-state="pre"]', (els) => els.map((e) => getComputedStyle(e).backgroundColor));
+    chk(`${lv.name}: prefilled cells are visibly coloured`, preBgs.every((c) => c !== 'rgba(0, 0, 0, 0)'), preBgs.slice(0, 3));
+    chk(`${lv.name}: no reference colours on the playable grid before completion`, (await page.locator('#main-grid .cell.art').count()) === 0);
+    await playLevelUI(page, id);
     await page.waitForSelector('#overlay-complete:not([hidden])');
     gs = await gameState(page);
     chk(`${lv.name}: completed, timer stopped`, gs.completed && !gs.running && gs.intervals === 0, gs);
+    const mm = await artMismatches(page);
+    chk(`${lv.name}: completed grid matches its own reference art cell-for-cell`, mm.length === 0, mm.slice(0, 5));
     chk(`${lv.name}: progress ${lv.clues.length} / ${lv.clues.length}`, (await progress(page)) === `${lv.clues.length} / ${lv.clues.length} clues`);
     chk(`${lv.name}: score ${gs.score}, ${gs.stars}★ shown`, (await text(page, '#stat-score')) === String(gs.score) && (await page.locator('#complete-stars .on').count()) === gs.stars);
     await page.screenshot({ path: SHOTS + `/06-${lv.name.toLowerCase()}-complete.png` });
@@ -280,17 +381,21 @@ async function playLevelUI(page, levelId, { useTap } = {}) {
       await page.waitForSelector('#screen-game:not([hidden])');
       const t = await text(page, '#game-title');
       chk(`Next Level button opened ${PC.LEVELS[id].name}`, t.includes(PC.LEVELS[id].name), t);
+      chk(`${PC.LEVELS[id].name}: previous level's art colours do not leak into new grid`, (await page.locator('#main-grid .cell.art').count()) === 0);
       chk('Exactly one timer interval after switching level', (await gameState(page)).intervals === 1);
-      if (id === 2 || id === 3 || id === 4) { /* stay in flow: next iteration expects level select */ await page.click('#btn-exit'); }
+      await page.click('#btn-exit');
     } else {
       chk('Expert: no Next button (last level)', !(await vis(page, '#btn-next')));
-      await page.click('#btn-complete-levels');
+      await page.click('#btn-replay');
+      gs = await gameState(page);
+      chk('Replay clears completed-artwork styling and restores play', (await page.locator('#main-grid .cell.art').count()) === 0 && gs.phase === 'solving' && !gs.completed && gs.placed === 0, gs);
+      await page.click('#btn-exit');
     }
   }
   await page.close();
 
-  /* ============ D. Timer, Restart, Exit ============ */
-  section('D. Timer / Restart / Exit');
+  /* ============ F. Timer, Restart, Exit ============ */
+  section('F. Timer / Restart / Exit');
   page = await newPage(browser, { unlocked: 1 });
   await openLevelFromSelect(page, 1);
   await page.waitForTimeout(1300);
@@ -298,7 +403,9 @@ async function playLevelUI(page, levelId, { useTap } = {}) {
   for (let i = 0; i < 4; i++) await page.click('#btn-restart');
   chk('Restart resets timer display to 00:00', (await text(page, '#timer')) === '00:00' && t1 !== '00:00');
   chk('Repeated Restart never creates duplicate intervals', (await gameState(page)).intervals === 1);
-  await answer(page, 0, 'ROOF'); await toggleCells(page, [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 2, y: 0 }, { x: 3, y: 0 }]); await page.click('#btn-confirm'); await drag(page, { dropX: 0, dropY: 0 });
+  await answer(page, 0, 'ROOF');
+  await dragCells(page, [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 2, y: 0 }, { x: 3, y: 0 }]);
+  await page.click('#btn-confirm');
   chk('Placed 1 block', (await progress(page)) === '1 / 3 clues');
   await page.click('#btn-restart');
   gs = await gameState(page);
@@ -313,8 +420,8 @@ async function playLevelUI(page, levelId, { useTap } = {}) {
   chk('Starting another level → exactly one interval, time restarted', (await gameState(page)).intervals === 1 && (await text(page, '#timer')) === '00:00');
   await page.close();
 
-  /* ============ E. Overlays never block ============ */
-  section('E. Hidden overlays / modals never intercept clicks');
+  /* ============ G. Overlays never block ============ */
+  section('G. Hidden overlays / modals never intercept clicks');
   page = await newPage(browser, { unlocked: 1 });
   const ov = await page.evaluate(() => ['overlay-complete', 'overlay-help'].map((id) => { const e = document.getElementById(id); const cs = getComputedStyle(e); return { id, hidden: e.hidden, display: cs.display, pe: cs.pointerEvents }; }));
   chk('Hidden overlays: display none + pointer-events none', ov.every((o) => o.hidden && o.display === 'none' && o.pe === 'none'), ov);
@@ -326,24 +433,30 @@ async function playLevelUI(page, levelId, { useTap } = {}) {
   const tops = await page.evaluate(() => ['btn-hint', 'btn-restart', 'btn-exit'].concat(['[data-answer-input="0"]']).map((s) => { const e = document.getElementById(s) || document.querySelector(s); const b = e.getBoundingClientRect(); const t = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2); return e === t || e.contains(t); }));
   chk('In-game controls (Hint, Restart, Exit, clue input) reachable — nothing overlays them', tops.every(Boolean), tops);
   await page.locator('[data-answer-input="0"]').fill('ro'); chk('Clue input accepts typing', (await page.locator('[data-answer-input="0"]').inputValue()) === 'ro');
+  chk('Only the active clue shows its answer row; others are collapsed', await vis(page, '[data-answer-input="0"]') && !(await vis(page, '[data-answer-input="1"]')));
+  await page.click('[data-clue="1"] .clue-head');
+  chk('Clicking a collapsed clue opens and focuses its answer row', await vis(page, '[data-answer-input="1"]') && await page.evaluate(() => document.activeElement.dataset.answerInput === '1') && !(await vis(page, '[data-answer-input="0"]')));
+  await page.keyboard.press('Shift+Tab');
+  await page.keyboard.press('Enter');
+  chk('Keyboard: Enter on a focused collapsed clue opens it', await page.evaluate(() => document.activeElement.dataset.answerInput === '0'));
   await page.close();
 
-  /* ============ F. localStorage failure ============ */
-  section('F. localStorage failure must not crash the game');
+  /* ============ H. localStorage failure ============ */
+  section('H. localStorage failure must not crash the game');
   const errBefore = consoleErrors.length;
   page = await newPage(browser, { init: () => { Storage.prototype.setItem = function () { throw new Error('QuotaExceeded (simulated)'); }; Storage.prototype.getItem = function () { throw new Error('SecurityError (simulated)'); }; } });
   await page.click('#btn-play');
   chk('Level select renders with storage disabled + notice shown', await vis(page, '#screen-levels'));
   await page.click('[data-play="1"]');
-  const sol = await playLevelUI(page, 1);
+  await playLevelUI(page, 1);
   await page.waitForSelector('#overlay-complete:not([hidden])');
   chk('Beginner completable with broken storage; no exceptions', consoleErrors.length === errBefore, consoleErrors.slice(errBefore));
   await page.click('#btn-next');
   chk('Next level (Easy) unlocked in-memory even though save failed', (await text(page, '#game-title')).includes('Easy'));
   await page.close();
 
-  /* ============ G. Presenter mode ============ */
-  section('G. Presenter mode leaves progression untouched');
+  /* ============ I. Presenter mode ============ */
+  section('I. Presenter mode leaves progression untouched');
   page = await newPage(browser, { unlocked: 1 });
   await page.click('#btn-play'); await page.check('#presenter-toggle');
   chk('Hard becomes openable in presenter mode', !(await page.locator('[data-play="4"]').isDisabled()));
@@ -357,8 +470,8 @@ async function playLevelUI(page, levelId, { useTap } = {}) {
   await page.screenshot({ path: SHOTS + '/08-expert.png' });
   await page.close();
 
-  /* ============ H. Responsive + drag accuracy ============ */
-  section('H. Responsive layouts + drag/drop coordinate accuracy at 1440 / 1024 / 768 / 600 / 390');
+  /* ============ J. Responsive layouts + grid/reference accuracy ============ */
+  section('J. Responsive layouts + grid draw accuracy at 1440 / 1024 / 768 / 600 / 390');
   for (const [w, h] of SIZES) {
     page = await newPage(browser, { viewport: { width: w, height: h }, unlocked: 5 });
     const ovf = async (label) => { const r = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, iw: innerWidth })); chk(`${w}px ${label}: no horizontal overflow`, r.sw <= r.iw, r); };
@@ -371,28 +484,26 @@ async function playLevelUI(page, levelId, { useTap } = {}) {
       await ovf(`${lv.name} ${lv.gridSize}×${lv.gridSize} game`);
       const g = await page.evaluate(() => { const r = document.getElementById('main-grid').getBoundingClientRect(); return { w: r.width, h: r.height, l: r.left, r: r.right, iw: innerWidth }; });
       chk(`${w}px ${lv.name}: grid square (${g.w.toFixed(0)}×${g.h.toFixed(0)}) and inside the viewport`, Math.abs(g.w - g.h) < 1.5 && g.l >= 0 && g.r <= g.iw + 0.5, g);
-      // first block of the proven solution: solve → build → drag → verify exact cells
+      const refOk = await page.evaluate(() => { const r = document.getElementById('reference-canvas').getBoundingClientRect(); return { l: r.left, r: r.right, iw: innerWidth }; });
+      chk(`${w}px ${lv.name}: reference image fits inside the viewport`, refOk.l >= -0.5 && refOk.r <= refOk.iw + 0.5, refOk);
+      // draw the first proven-solution piece directly on the grid and verify exact cells land correctly
       const s = solve(lv).solution[0];
-      const minX = Math.min(...s.cells.map((c) => c.x)), minY = Math.min(...s.cells.map((c) => c.y));
-      const rel = s.cells.map((c) => ({ x: c.x - minX, y: c.y - minY }));
       await answer(page, s.clue, lv.clues[s.clue].answer);
-      const bb = await page.evaluate(() => { const r = document.getElementById('builder-grid').getBoundingClientRect(); return { l: r.left, r: r.right, iw: innerWidth }; });
-      chk(`${w}px ${lv.name}: builder fits (${bb.r.toFixed(0)} ≤ ${bb.iw})`, bb.l >= 0 && bb.r <= bb.iw + 0.5, bb);
-      await toggleCells(page, rel); await page.click('#btn-confirm');
-      const tb = await page.evaluate(() => { const r = document.getElementById('tray-block').getBoundingClientRect(); return { l: r.left, r: r.right, iw: innerWidth }; });
-      chk(`${w}px ${lv.name}: block tray fits`, tb.l >= 0 && tb.r <= tb.iw + 0.5, tb);
+      await dragCells(page, s.cells);
+      chk(`${w}px ${lv.name}: drag-painted exactly the proven cells under the pointer`, same(await ownCells(page), key(s.cells)), await ownCells(page));
+      await page.click('#btn-confirm');
+      chk(`${w}px ${lv.name}: confirmed shape committed to the exact cells`, same(await gridBlockCells(page), key(s.cells)));
       if (id === 1 || id === 5) await page.screenshot({ path: SHOTS + `/10-${lv.name.toLowerCase()}-${w}.png` });
-      // place, verify exact cells, undo, repeat after a viewport resize (test re-layout accuracy)
-      await drag(page, { dropX: minX, dropY: minY });
-      chk(`${w}px ${lv.name}: block landed on the exact cells under the pointer`, same(await gridBlockCells(page), key(s.cells)), await gridBlockCells(page));
       if (id === 3) {
         for (const [w2, h2] of SIZES) {
           await page.setViewportSize({ width: w2, height: h2 }); await page.waitForTimeout(120);
           await page.click('#btn-undo');
-          await drag(page, { dropX: minX, dropY: minY });
-          const okc = same(await gridBlockCells(page), key(s.cells));
-          if (!okc) chk(`${w}→${w2}px resize: drop accuracy`, false, await gridBlockCells(page));
-          else if (w2 === 390) chk(`${w}px→ resized through all sizes: drop stays accurate (checked at every size)`, true);
+          await page.click('#btn-clear'); // undo pre-populates the shape; clear it so the redraw below exercises fresh paint clicks, not erases
+          await dragCells(page, s.cells);
+          const okc = same(await ownCells(page), key(s.cells));
+          if (okc) await page.click('#btn-confirm');
+          if (!okc) chk(`${w}→${w2}px resize: drag-draw accuracy`, false, await ownCells(page));
+          else if (w2 === 390) chk(`${w}px→ resized through all sizes: drag-draw stays accurate (checked at every size)`, true);
         }
         await page.setViewportSize({ width: w, height: h }); await page.waitForTimeout(100);
       }

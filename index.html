@@ -63,12 +63,16 @@
     </div>
 
     <div class="toolbar">
-      <button class="btn btn-ghost btn-sm" id="btn-undo" type="button" title="Pick up the last placed block">
+      <button class="btn btn-ghost btn-sm" id="btn-undo" type="button" title="Pick up the last placed shape">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M9 7 4 12l5 5M4 12h10a6 6 0 0 1 0 12" transform="translate(0 -3)" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Undo</button>
       <button class="btn btn-ghost btn-sm" id="btn-restart" type="button" title="Start this level again">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.4-5.7M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Restart</button>
       <button class="btn btn-hint btn-sm" id="btn-hint" type="button" title="Reveal a letter (costs 75 points)">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z" fill="currentColor" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>Hint</button>
+      <span class="spacer"></span>
+      <span class="chip pink draw-status" id="draw-status" hidden></span>
+      <button class="btn btn-ghost btn-sm" id="btn-clear" type="button" hidden>Clear Shape</button>
+      <button class="btn btn-primary btn-sm" id="btn-confirm" type="button" hidden>Confirm Shape</button>
     </div>
 
     <div id="coach" class="coach" hidden><span class="coach-step" id="coach-step"></span><span id="coach-text"></span></div>
@@ -82,39 +86,17 @@
 
       <section class="panel board-panel" aria-label="Puzzle grid">
         <div class="grid-frame" id="grid-frame">
-          <div class="main-grid" id="main-grid" role="grid" aria-label="Puzzle grid"></div>
+          <div class="main-grid" id="main-grid" role="grid" aria-label="Puzzle grid. Click a cell to place a pixel, click again to remove it, or click and drag to paint or erase several at once."></div>
         </div>
-        <p class="legend"><span class="lg lg-target"></span> picture to build <span class="lg lg-pre"></span> already filled <span class="lg lg-off"></span> outside picture</p>
+        <p class="legend"><span class="lg lg-pre"></span> already filled <span class="lg lg-off"></span> outside picture (after placing)</p>
       </section>
 
-      <section class="panel work-panel" id="work-panel" aria-label="Shape workspace">
-        <h3>Shape workspace</h3>
-
-        <div id="panel-idle" class="work-idle">
-          <p><strong>No pixels yet.</strong></p>
-          <p class="muted">Solve a clue to earn pixels, then shape them here.</p>
+      <section class="panel reference-panel" aria-label="Reference image">
+        <h3>Reference</h3>
+        <div class="reference-frame">
+          <canvas id="reference-canvas" aria-label="Target pixel-art picture to reconstruct" role="img"></canvas>
         </div>
-
-        <div id="panel-builder" hidden>
-          <p class="need">Required pixels: <strong id="need-count">4</strong> &nbsp;·&nbsp; Selected: <strong id="sel-count" class="sel">0 / 4</strong></p>
-          <div class="builder-grid" id="builder-grid" role="group" aria-label="Shape builder. Click cells to toggle."></div>
-          <p class="builder-msg" id="builder-msg" aria-live="polite"></p>
-          <div class="row-btns">
-            <button class="btn btn-ghost btn-sm" id="btn-builder-reset" type="button">Reset</button>
-            <button class="btn btn-primary btn-sm" id="btn-confirm" type="button">Confirm Shape</button>
-          </div>
-        </div>
-
-        <div id="panel-tray" hidden>
-          <p class="need">Your block <span class="muted" id="tray-for"></span></p>
-          <div class="tray-wrap"><div class="tray-block" id="tray-block" role="button" tabindex="0" aria-label="Your block. Drag it onto the grid, or press Enter then click a grid cell."></div></div>
-          <p class="builder-msg muted" id="tray-help">Drag the block onto the grid &mdash; or tap it, then tap a grid cell.</p>
-          <div class="row-btns">
-            <button class="btn btn-ghost btn-sm" id="btn-rotate" type="button" title="Rotate 90° (R)">Rotate</button>
-            <button class="btn btn-ghost btn-sm" id="btn-reshape" type="button">Edit shape</button>
-          </div>
-          <p class="muted small" id="queue-note" hidden></p>
-        </div>
+        <p class="muted small reference-caption">Visual reference only &mdash; not interactive. Rebuild it on the grid.</p>
       </section>
     </div>
   </section>
@@ -147,9 +129,9 @@
     <ol class="howto">
       <li><strong>Solve a clue.</strong> Type the answer and press Enter.</li>
       <li><strong>Earn pixels.</strong> A 6-letter answer gives you 6 pixels.</li>
-      <li><strong>Design a shape.</strong> Click cells to make <em>any</em> connected shape from exactly that many pixels (edges must touch &mdash; corners don't count).</li>
-      <li><strong>Confirm</strong>, then <strong>drag the whole block</strong> onto the grid.</li>
-      <li><strong>Fill the faint picture.</strong> Use Undo or Restart if you get stuck.</li>
+      <li><strong>Look at the reference image</strong> on the right, then <strong>draw directly on the grid</strong>: click a cell to place a pixel, click it again to remove it, or click-and-drag to paint or erase several at once.</li>
+      <li><strong>Use exactly that many pixels</strong>, all connected edge-to-edge (corners don't count), then press <strong>Confirm Shape</strong>.</li>
+      <li><strong>Rebuild the whole picture.</strong> Use Undo or Restart if you get stuck.</li>
     </ol>
     <div class="row-btns center"><button class="btn btn-primary" id="btn-help-close" type="button">Got it</button></div>
   </div>

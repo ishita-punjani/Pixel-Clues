@@ -16,36 +16,18 @@
       return g;
     },
 
-    /**
-     * Validate placing `cells` (relative coords) with its origin at (dropX, dropY).
-     * Valid only if EVERY cell is inside the grid and lands on an empty cell.
-     * Does not modify the grid.
-     */
-    canPlace(grid, cells, dropX, dropY) {
-      const size = grid.length;
-      const bad = [];
-      let outside = false, collision = false;
-      for (const c of cells) {
-        const ax = dropX + c.x;
-        const ay = dropY + c.y;
-        if (ax < 0 || ax >= size || ay < 0 || ay >= size) { outside = true; bad.push({ x: ax, y: ay, type: 'outside' }); continue; }
-        if (grid[ay][ax] !== null) { collision = true; bad.push({ x: ax, y: ay, type: 'collision' }); }
-      }
-      if (outside) return { ok: false, reason: 'out-of-bounds', message: 'That block goes outside the puzzle.', bad };
-      if (collision) return { ok: false, reason: 'collision', message: 'That space is already occupied.', bad };
-      return { ok: true, reason: null, message: '', bad: [] };
+    inBounds(grid, x, y) { return x >= 0 && y >= 0 && y < grid.length && x < grid.length; },
+    isFree(grid, x, y) { return Grid.inBounds(grid, x, y) && grid[y][x] === null; },
+    isOccupied(grid, x, y) { return Grid.inBounds(grid, x, y) && grid[y][x] !== null; },
+
+    /** Mark absolute cells {x,y} with `info` (e.g. {clue, block}). Cells must already be free. */
+    put(grid, cells, info) {
+      cells.forEach((c) => { grid[c.y][c.x] = Object.assign({}, info); });
     },
 
-    absolute(cells, dropX, dropY) {
-      return cells.map((c) => ({ x: dropX + c.x, y: dropY + c.y }));
-    },
-
-    put(grid, cells, dropX, dropY, info) {
-      for (const c of Grid.absolute(cells, dropX, dropY)) grid[c.y][c.x] = Object.assign({}, info);
-    },
-
-    remove(grid, cells, dropX, dropY) {
-      for (const c of Grid.absolute(cells, dropX, dropY)) grid[c.y][c.x] = null;
+    /** Clear absolute cells {x,y} back to empty. */
+    remove(grid, cells) {
+      cells.forEach((c) => { grid[c.y][c.x] = null; });
     },
 
     /** Compare occupancy of the player's grid with the target matrix. */
